@@ -1,0 +1,610 @@
+{
+  "name": "Agent_2_FINAL_2026-07-10",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        80
+      ],
+      "id": "ee840015-04c7-45bc-82cc-be9c1c38f1bb",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  a.association_id,\n  a.herb_id,\n  a.disease_id,\n  hm.botanical_name,\n  dm.sanskrit_name    AS disease_sanskrit,\n  dm.english_name     AS disease_english,\n  dm.disease_category AS category_name,\n  a.prominence_score\nFROM herb_disease_associations a \nJOIN herbs_master hm    ON a.herb_id   = hm.herb_id\nJOIN diseases_master dm ON a.disease_id = dm.disease_id\nWHERE hm.gbif_id         IS NOT NULL\n  AND a.skip_reason      IS NULL\n  AND a.association_type = 'indicated'\n  AND a.last_study_search_at IS NULL\nORDER BY a.prominence_score DESC NULLS LAST, a.association_id;",
+        "options": {}
+      },
+      "id": "08a6bcca-7fba-4d41-86aa-4899faf2f71d",
+      "name": "Query (PostgreSQL)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -224,
+        80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        0,
+        80
+      ],
+      "id": "cfed6cc7-42bf-4d3e-abd2-9e4cbb2e41fd",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- ============================================================\n-- AGENT 2: Final DB Node — Insert/Update PubMed Study\n-- Logic fixes: count from real rows, direct association_id\n-- ============================================================\n\nINSERT INTO modern_studies_raw (\n  pmid,\n  herb_id,\n  title,\n  abstract,\n  publication_date,\n  journal,\n  authors,\n  doi,\n  mesh_terms,\n  fetched_at,\n  processed,\n  association_id,\n  disease_id,\n  publication_date_varchar,\n  pubmed_url,\n  is_new,\n  study_classified\n) VALUES (\n  {{ $json.pmid || 0 }},\n  {{ $json.herb_id }},\n  '{{ $json.title_safe }}',\n  '{{ $json.abstract_safe }}',\n  '{{ $json.publication_date_varchar || \"\" }}',\n  '{{ $json.journal_safe || \"\" }}',\n  '{{ $json.authors_safe || \"\" }}',\n  NULL,\n  ARRAY[]::text[],\n  '{{ $json.fetched_at }}'::timestamp,\n  true,\n  {{ $json.association_id }},\n  {{ $json.disease_id }},\n  '{{ $json.publication_date_varchar || \"\" }}',\n  'https://pubmed.ncbi.nlm.nih.gov/' || {{ $json.pmid || 0 }}::text,\n  -- is_new: true only if this herb has never been PubMed-checked before\n  NOT EXISTS (\n    SELECT 1 FROM modern_studies_raw\n    WHERE herb_id = {{ $json.herb_id }}\n      AND pmid != {{ $json.pmid || 0 }}\n  ),\n  false\n)\nON CONFLICT (pmid) DO UPDATE SET\n  herb_id               = EXCLUDED.herb_id,\n  title                 = EXCLUDED.title,\n  abstract              = EXCLUDED.abstract,\n  publication_date      = EXCLUDED.publication_date,\n  journal               = EXCLUDED.journal,\n  authors               = EXCLUDED.authors,\n  doi                   = EXCLUDED.doi,\n  mesh_terms            = EXCLUDED.mesh_terms,\n  fetched_at            = EXCLUDED.fetched_at,\n  processed             = EXCLUDED.processed,\n  association_id        = EXCLUDED.association_id,\n  disease_id            = EXCLUDED.disease_id,\n  publication_date_varchar = EXCLUDED.publication_date_varchar,\n  pubmed_url            = EXCLUDED.pubmed_url,\n  is_new                = EXCLUDED.is_new,\n  study_classified      = EXCLUDED.study_classified;\n\n-- ── Update association: use direct association_id, count from real rows ──\nUPDATE herb_disease_associations\nSET\n  study_search_status   = 'found_results',\n  -- Real count from DB, not blindly incrementing\n  study_search_count    = (\n    SELECT COUNT(*)\n    FROM modern_studies_raw\n    WHERE association_id = {{ $json.association_id }}\n  ),\n  last_study_search_at  = CURRENT_TIMESTAMP,\n  study_search_source   = 'Agent2',\n  study_search_notes    = 'PubMed study inserted/updated',\n  updated_at            = CURRENT_TIMESTAMP\nWHERE association_id = {{ $json.association_id }};",
+        "options": {
+          "queryBatching": "single"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2896,
+        -16
+      ],
+      "id": "913cc520-b866-426c-9530-3f106569dad7",
+      "name": "PostgreSQL node",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const loopItem = $input.first().json;\nconst xmlString = $input.item.json.data || '';\n\nif (xmlString.includes('<PubmedArticleSet>')) {\n  // EFetch case - parse articles\n  // ... existing article parsing code\n} else {\n  // ESearch case - parse Count & IdList\n  const countMatch = xmlString.match(/<Count>(\\d+)<\\/Count>/);\n  const count = parseInt(countMatch?.[1] || '0');\n  \n  const pmidRegex = /<Id>(\\d+)<\\/Id>/g;\n  const pmids = [];\n  let match;\n  while ((match = pmidRegex.exec(xmlString)) !== null) {\n    pmids.push(match[1]);\n  }\n  \n  return [{\n    json: {\n      ...loopItem,\n      pubmed_count: count,\n      pubmed_pmids: pmids.slice(0, 500),\n      needs_fetch: count > 0,\n      studies_found: count > 0,\n      fetched_at: new Date().toISOString()\n    }\n  }];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -160
+      ],
+      "id": "354c3957-f68a-46f5-a068-e481f3c866c8",
+      "name": "Parse XML & Extract PMIDs"
+    },
+    {
+      "parameters": {
+        "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "db",
+              "value": "pubmed"
+            },
+            {
+              "name": "id",
+              "value": "={{ $json.pubmed_pmids.join(',') }}"
+            },
+            {
+              "name": "retmode",
+              "value": "xml"
+            },
+            {
+              "name": "retmax",
+              "value": "50"
+            },
+            {
+              "name": "apikey",
+              "value": "REPLACE WITH YOURS"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1
+            }
+          },
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2000,
+        -16
+      ],
+      "id": "1f82819e-567a-48e6-b26b-e00cba6fcaaa",
+      "name": "HTTP PubMed EFetch",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node (Run Once for All Items)\n\n// 1) Find the context item (gap_scores / association metadata)\nlet context = null;\n\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (\n    j.association_id !== undefined ||\n    j.herb_id !== undefined ||\n    j.disease_id !== undefined ||\n    j.botanical_name !== undefined\n  ) {\n    context = j;\n    break;\n  }\n}\n\n// Fallback to first item if nothing matched (keeps workflow from crashing)\nif (!context) {\n  context = $input.first().json || {};\n}\n\n// 2) Find the EFetch XML item\nlet xmlString = '';\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (typeof j.data === 'string' && j.data.includes('<PubmedArticleSet>')) {\n    xmlString = j.data;\n    break;\n  }\n}\n\nif (!xmlString) {\n  return [{ json: { error: 'No EFetch XML found', ...context } }];\n}\n\n// 3) Parse PubMed articles\nconst papers = [];\nconst articleRegex = /<PubmedArticle>.*?<\\/PubmedArticle>/gs;\nconst articles = xmlString.match(articleRegex) || [];\n\nfor (const article of articles) {\n  const pmidMatch = article.match(/<PMID[^>]*>(\\d+)<\\/PMID>/);\n  const titleMatch = article.match(/<ArticleTitle>(.*?)<\\/ArticleTitle>/s);\n\n  const abstractMatches =\n    article.match(/<AbstractText[^>]*>(.*?)<\\/AbstractText>/gs) || [];\n  const abstractText = abstractMatches\n    .map(m => m.replace(/<[^>]*>/g, '').trim())\n    .join(' ')\n    .substring(0, 2000);\n\n  const journalMatch = article.match(/<MedlineTA>(.*?)<\\/MedlineTA>/);\n  const yearMatch = article.match(/<Year>(\\d{4})<\\/Year>/);\n\n  if (pmidMatch && titleMatch) {\n    papers.push({\n      pmid: parseInt(pmidMatch[1], 10),\n      title: titleMatch[1].replace(/<[^>]*>/g, '').trim().substring(0, 500),\n      abstract: abstractText,\n      journal: journalMatch ? journalMatch[1].trim().substring(0, 200) : 'Unknown',\n      publication_date: yearMatch ? yearMatch[1] : 'unknown',\n\n      // Propagate context reliably (may be null/undefined if upstream truly didn't provide)\n      association_id: context.association_id ?? null,\n      herb_id: context.herb_id ?? null,\n      disease_id: context.disease_id ?? null,\n      botanical_name: context.botanical_name ?? null,\n\n      fetched_at: new Date().toISOString(),\n    });\n  }\n}\n\nreturn papers.map(paper => ({ json: paper }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        -96
+      ],
+      "id": "55a42f58-9cf6-4da8-ac6b-ece04a588a0a",
+      "name": "Parse abstract"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        688,
+        -208
+      ],
+      "id": "6ee49326-ce53-4caf-beb9-994e7fcf3549",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "fieldsToMatchString": "association_id",
+        "joinMode": "keepEverything",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2224,
+        -96
+      ],
+      "id": "b9e39f26-9bb5-4f6d-9940-1a0e7da1f8c2",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sanitize: Process ALL items (Run Once for All Items mode)\nconst items = $input.all().map(item => {\n  const data = item.json;\n  const escapeSql = (str) => str ? String(str)\n    .replace(/'/g, \"''\")\n    .replace(/\\n/g, ' ')\n    .replace(/\\r/g, ' ')\n    .replace(/\\t/g, ' ')\n    .trim() : '';\n\n  return {\n    json: {\n      ...data,\n      title_safe: escapeSql(data.title),\n      abstract_safe: escapeSql(data.abstract),\n      journal_safe: escapeSql(data.journal)\n    }\n  };\n});\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        -96
+      ],
+      "id": "10687a3b-243d-43ae-bfb5-183287b5a7bf",
+      "name": "Sanitize data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ede6cf01-971c-411c-a5cf-925d291cdf1a",
+              "leftValue": "={{ $json.pubmed_searches }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1552,
+        -160
+      ],
+      "id": "a099d54a-7ea5-408b-b9f7-d5b7b3b7fa15",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preserve ALL data for downstream If + studies\nconst item = $input.item.json;\nconst categoryName = item.diseasecategory || item.category_name;  // From assoc or prior\nconst output = {\n  ...item,\n  category_id: [/* Query: SELECT category_id FROM therapeutic_categories WHERE category_name = categoryName */],  // Resolve via DB or prior node\n  pubmed_searches: item.pubmed_count || 0,\n  last_pubmed_check: item.fetched_at,\n  needs_fetch: (item.pubmed_count || 0) > 0\n};\nreturn [{ json: output }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        -160
+      ],
+      "id": "555a374b-aad9-4fcc-a87b-360aa539ca2d",
+      "name": "Gap Updater"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO gap_scores (\n  herb_id,\n  category_id,\n  last_pubmed_check,\n  total_studies,\n  papers_fetched_this_run,\n  pair_fetched_complete\n)\nSELECT\n  {{ $json.herb_id }},\n  tc.category_id,\n  CURRENT_TIMESTAMP,\n  (\n    SELECT COUNT(*)\n    FROM modern_studies_raw msr\n    JOIN herb_disease_associations hda\n      ON msr.association_id = hda.association_id\n    WHERE msr.herb_id = {{ $json.herb_id }}\n      AND hda.disease_category = tc.category_name\n  ),\n  (\n    SELECT COUNT(*)\n    FROM modern_studies_raw\n    WHERE association_id = {{ $json.association_id }}\n  ),\n  true\nFROM therapeutic_categories tc\nWHERE tc.category_name = '{{ $json.category_name }}'\nON CONFLICT (herb_id, category_id) DO UPDATE SET\n  last_pubmed_check       = EXCLUDED.last_pubmed_check,\n  total_studies           = EXCLUDED.total_studies,\n  papers_fetched_this_run = EXCLUDED.papers_fetched_this_run,\n  pair_fetched_complete   = EXCLUDED.pair_fetched_complete;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1856,
+        -368
+      ],
+      "id": "d68a24ea-6624-41e3-817c-fc5bd13d8900",
+      "name": "gap_scores Store (Postgres)",
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1776,
+        -16
+      ],
+      "id": "6c16bb9f-f786-4898-b904-d1695cca7919",
+      "name": "Wait",
+      "webhookId": "a80b06b0-f0f2-4320-a64e-edfa8ec510dc"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        -240
+      ],
+      "id": "515e188b-31e4-4ba4-8e6a-f8d7088da568",
+      "name": "Wait1",
+      "webhookId": "bd8806b9-e273-4b1e-98e0-7ddd8d386be0"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE herb_disease_associations\nSET study_search_status = '{{ $json.sql_status }}',\n    study_search_count = COALESCE(study_search_count, 0) + {{ $json.sql_count }},\n    last_study_search_at = CURRENT_TIMESTAMP,\n    study_search_source = 'Agent2',\n    study_search_notes = '{{ $json.sql_notes }}'\nWHERE association_id = {{ $json.association_id }};\n\n-- ── Existing gap_scores upsert ──────────────────────────────\nINSERT INTO gap_scores (\n  herb_id,\n  category_id,\n  last_pubmed_check,\n  total_studies,\n  papers_fetched_this_run,\n  pair_fetched_complete\n)\nSELECT\n  {{ $json.herb_id }},\n  tc.category_id,\n  CURRENT_TIMESTAMP,\n  (\n    SELECT COUNT(*)\n    FROM modern_studies_raw msr\n    JOIN herb_disease_associations hda\n      ON msr.association_id = hda.association_id\n    WHERE msr.herb_id = {{ $json.herb_id }}\n      AND hda.disease_category = tc.category_name\n  ),\n  0,\n  true\nFROM therapeutic_categories tc\nWHERE tc.category_name = '{{ $json.category_name }}'\nON CONFLICT (herb_id, category_id) DO UPDATE SET\n  last_pubmed_check       = EXCLUDED.last_pubmed_check,\n  total_studies           = EXCLUDED.total_studies,\n  papers_fetched_this_run = EXCLUDED.papers_fetched_this_run,\n  pair_fetched_complete   = EXCLUDED.pair_fetched_complete;\n\n-- ── THIS IS WHAT WAS MISSING — stamps the association as done ──\nUPDATE herb_disease_associations\nSET\n  study_search_status  = 'no_results',\n  study_search_count   = 0,\n  last_study_search_at = CURRENT_TIMESTAMP,\n  study_search_source  = 'Agent2',\n  study_search_notes   = 'PubMed search completed — no papers found',\n  updated_at           = CURRENT_TIMESTAMP\nWHERE association_id = {{ $json.association_id }};",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1328,
+        -368
+      ],
+      "id": "4198507f-7cf0-455c-8f0a-4188cefbac2b",
+      "name": "presearch_query",
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "db",
+              "value": "pubmed"
+            },
+            {
+              "name": "term",
+              "value": "=\"{{ $json.botanical_name }}[Title/Abstract] AND {{ $json.category_name }}[Title/Abstract]\""
+            },
+            {
+              "name": "mindate",
+              "value": "={{ $json.last_check || '2004/01/01' }}"
+            },
+            {
+              "name": "maxdate",
+              "value": "={{ new Date().toISOString().split('T')[0].replace(/-/g, '/') }}"
+            },
+            {
+              "name": "datetype",
+              "value": "pdat"
+            },
+            {
+              "name": "retmax",
+              "value": "100"
+            },
+            {
+              "name": "api_key",
+              "value": "REPLACE WITH YOURS"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        160,
+        -208
+      ],
+      "id": "9ab2a85b-1f99-4257-846a-b2b0755c0b99",
+      "name": "HTTP PubMed Search",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Safe SQL builder\nconst item = $input.item.json;\nconst count = item.pubmed_count || 0;\nconst status = count > 0 ? 'found_results' : (count === 0 ? 'no_results' : 'search_failed');\nconst safeBotanical = (item.botanical_name || '').replace(/['\"]/g, '').replace(/\\s+/g, ' ');  // Strip quotes/spaces\nconst safeDisease = (item.disease_english || '').replace(/['\"]/g, '').replace(/\\s+/g, ' ');\nconst notes = `PubMed eSearch: Count=${count} (${safeBotanical} ${safeDisease})`;\n\nreturn [{\n  json: {\n    ...item,\n    sql_status: status,\n    sql_notes: notes,\n    sql_count: 1  // Fixed increment\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        -288
+      ],
+      "id": "30dd27be-415e-4a54-b567-52b963d829ca",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Query (PostgreSQL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query (PostgreSQL)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "HTTP PubMed Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL node": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse XML & Extract PMIDs": {
+      "main": [
+        [
+          {
+            "node": "Gap Updater",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP PubMed EFetch": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Parse XML & Extract PMIDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse abstract": {
+      "main": [
+        [
+          {
+            "node": "Sanitize data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Parse abstract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize data": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "gap_scores Store (Postgres)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gap Updater": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "gap_scores Store (Postgres)": {
+      "main": [
+        []
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "HTTP PubMed EFetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "presearch_query": {
+      "main": [
+        []
+      ]
+    },
+    "HTTP PubMed Search": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "presearch_query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b8de2eac-d872-4443-92f3-82c923eafcd1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d5916a4c66673608c0331fba7cbae52e9b88270bfdef6cbcbf8524d7b5d76f9b"
+  },
+  "nodeGroups": [],
+  "id": "iw5H2iGYXQLZBZTL",
+  "tags": [
+    {
+      "updatedAt": "2026-02-23T13:49:15.886Z",
+      "createdAt": "2026-02-23T13:49:15.886Z",
+      "id": "ofSjHgJLSeTDsJFO",
+      "name": "working"
+    }
+  ]
+}
