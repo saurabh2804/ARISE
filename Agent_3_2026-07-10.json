@@ -1,0 +1,305 @@
+{
+  "name": "Agent_3_2026-07-10",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1600,
+        -64
+      ],
+      "id": "a7616df9-d242-4d79-b8a9-d28e8dc43d5b"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH total_count AS (\n  SELECT COUNT(*) AS cnt\n  FROM modern_studies_raw msr\n  JOIN herb_disease_associations hda ON msr.association_id = hda.association_id\n),\nnext_paper AS (\n  SELECT\n    msr.pmid,\n    msr.herb_id,\n    msr.disease_id,\n    msr.association_id,\n    msr.title,\n    msr.abstract,\n    msr.mesh_terms,\n    msr.journal,\n    total_count.cnt AS batch_total\n  FROM modern_studies_raw msr\n  JOIN herb_disease_associations hda ON msr.association_id = hda.association_id\n  CROSS JOIN total_count\n  LEFT JOIN modern_studies_classified msc ON msr.pmid = msc.pmid \n  WHERE msr.study_classified = false  -- Unclassified only (our flag)\n  ORDER BY msr.fetched_at ASC\n)\nSELECT *, ROW_NUMBER() OVER () AS batch_position\nFROM next_paper;\n",
+        "options": {}
+      },
+      "name": "PostgreSQL Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1376,
+        -64
+      ],
+      "id": "bb584736-dff6-433d-842d-a89a31bb7c6f",
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Classify the scientific design and evidence strength of this modern study.\n\n**MANDATE**: Classify STUDY TYPE ONLY. Do NOT change pmid, herb_id, or association_id — copy them exactly from INPUT.\n\n**INPUT**:\n- PMID: {{ $json.pmid }}\n- Herb ID: {{ $json.herb_id }}\n- Association ID: {{ $json.association_id }}\n- Title: {{ $json.title }}\n- Abstract: {{ $json.abstract }}\n\n**CLASSIFICATION RULES**:\nstudy_type → ONE OF: insilico | invitro | invivo | clinicaltrial | review | metaanalysis | casestudy\nvalidation_level → ONE OF: preliminary | established | conclusive | insufficient\n\n**SKIP** → return exactly {} (nothing else) ONLY IF abstract is blank/null.\n**OTHERWISE** → always return full JSON, default to review + insufficient + 0.7 confidence.\n\n**OUTPUT** (valid JSON only, no markdown):\n{\n  \"pmid\": \"{{ $json.pmid }}\",\n  \"herb_id\": {{ $json.herb_id }},\n  \"association_id\": {{ $json.association_id }},\n  \"study_type\": \"<ONE OF: insilico|invitro|invivo|clinicaltrial|review|metaanalysis|casestudy>\",\n  \"validation_level\": \"<ONE OF: preliminary|established|conclusive|insufficient>\",\n  \"phytochemicals\": <[] OR [\"curcumin\", \"piperine\"] - exact names from abstract>,\n  \"targets\": <[] OR [\"COX-2\", \"TNF-α\"] - exact names from abstract>,\n  \"sample_size\": <null OR integer e.g. 45>,\n  \"p_value\": <null OR decimal e.g. 0.023>,\n  \"significance_reported\": <true/false>,\n  \"llm_confidence\": <your estimate 0.7-0.95>\n}\n\n**STRICT RULES**:\n- pmid/herb_id/association_id: COPY EXACTLY from INPUT — never change, never invent\n- phytochemicals/targets: exact names from abstract only, empty array if none\n- sample_size: integer only if explicitly stated, else null\n- p_value: decimal only if explicitly stated, else null\n- significance_reported: true only if paper states p<0.05 or \"significant\"\n- llm_confidence: 0.7 (uncertain) → 0.95 (very clear)\n- {} ONLY for blank abstract — never for valid studies\n",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        -928,
+        -192
+      ],
+      "id": "2f3ae615-8314-4b5b-9756-25cff374266e",
+      "name": "Basic LLM Chain",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsonMetadata": {},
+        "model": {
+          "__rl": true,
+          "value": "sarvam-105b",
+          "mode": "list",
+          "cachedResultName": "sarvam-105b"
+        },
+        "options": {}
+      },
+      "type": "@rlquilez/n8n-nodes-openai-litellm.lmChatOpenAiLitellm",
+      "typeVersion": 1.2,
+      "position": [
+        -1072,
+        112
+      ],
+      "id": "63a64cd1-38c2-41bd-b507-5e6b9629cca8",
+      "name": "OpenAI Chat Model with LiteLLM",
+      "retryOnFail": true,
+      "credentials": {
+        "openAiApiWithLitellmApi": {
+          "id": "YOUR_CREDENTIALS",
+          "name": "OpenAI with LiteLLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();  // LLM text outputs\nconst allClassifications = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const llmItem = items[i];\n  const rawText = llmItem.json.text;\n  console.log(`Item ${i} raw: ${rawText.slice(0, 100)}...`);\n\n  // Skip explicit empties\n  if (rawText.trim() === '{}' || rawText.trim() === '{ }' || rawText.trim() === '') {\n    console.log(`Item ${i}: Explicit empty - skipped`);\n    continue;\n  }\n\n  let cls = {};\n  try {\n    // Aggressive unescape for n8n/LLM double-escaping\n    let cleaned = rawText\n      .replace(/\\\\\\\\n/g, ' ')                    // \\\\n → space\n      .replace(/\\\\\\\\\"/g, '\"')                   // \\\\\" → \"\n      .replace(/\\\\\\\\\\\\\\\\\"/g, '\\\\\"')             // \\\\\\\\\" → \\\"\n      .replace(/\\\\\\\\\\\\\\\\/g, '\\\\')               // Escaped backslashes\n      .replace(/\\\\\\\\t/g, '') \n      .replace(/\\\\\\\\r/g, '')\n      .trim();\n\n    // Extract outermost JSON (handles nested braces)\n    const jsonMatch = cleaned.match(/\\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}/);\n    if (!jsonMatch) {\n      console.log(`Item ${i}: No JSON match in \"${cleaned.slice(0, 100)}\"`);\n      continue;\n    }\n\n    cls = JSON.parse(jsonMatch[0]);\n    console.log(`Parsed item ${i}:`, cls);\n  } catch (e) {\n    console.log(`Parse fail ${i}: ${e.message}`);\n    console.log(`Raw snippet: ${rawText.slice(0, 200)}`);\n    continue;\n  }\n\n  // REQUIRED fields for Agent 3\n  if (!cls.pmid || !cls.association_id) {\n    console.log(`Skipped item ${i}: missing pmid(${cls.pmid}) OR association_id(${cls.association_id})`);\n    continue;\n  }\n\n  // ✅ Map to exact DB CHECK constraint enums\n  const dbStudyTypes = {\n    'invitro': 'in_vitro',\n    'invivo': 'in_vivo',\n    'clinicaltrial': 'clinical_trial', \n    'review': 'review',\n    'metaanalysis': 'meta_analysis',\n    'casestudy': 'case_study'\n  };\n\n  const dbLevels = {\n    'preliminary': 'preliminary',\n    'established': 'established', \n    'conclusive': 'conclusive',\n    'insufficient': 'insufficient'\n  };\n\n  const standardized = {\n    pmid: String(cls.pmid),                    // Keep as string for n8n\n    herb_id: parseInt(cls.herb_id) || null,\n    association_id: parseInt(cls.association_id),\n    study_type: dbStudyTypes[cls.study_type?.toLowerCase()] || 'review',\n    validation_level: dbLevels[cls.validation_level?.toLowerCase()] || 'preliminary',\n    phytochemicals: cls.phytochemicals || [],\n    biological_targets: cls.targets || [],\n    sample_size: cls.sample_size !== undefined ? parseInt(cls.sample_size) || null : null,\n    p_value: cls.p_value !== undefined ? parseFloat(cls.p_value) || null : null,\n    significance_reported: Boolean(cls.significance_reported),\n    llm_confidence: parseFloat(cls.llm_confidence) || 0.0,\n    source_item: i\n  };\n\n  allClassifications.push(standardized);\n  console.log(`✅ Accepted ${i}: ${cls.pmid} (${standardized.study_type}) conf=${standardized.llm_confidence}`);\n}\n\nconst filtered = allClassifications.filter(c => c.pmid && c.association_id && c.herb_id);\n\nreturn [{\n  json: {\n    classifications: filtered,\n    total_accepted: filtered.length,\n    total_attempted: items.length,\n    skipped: items.length - filtered.length,\n    sample: JSON.stringify(filtered.slice(0, 2), null, 2),\n    avg_confidence: filtered.length ? (filtered.reduce((sum, c) => sum + c.llm_confidence, 0) / filtered.length).toFixed(3) : 0\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -576,
+        -192
+      ],
+      "id": "1b839b88-5a89-43f8-8b8f-71ea15691436",
+      "name": "Parse & Enrich Classifications"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH assoc AS (\n  SELECT tc.category_id\n  FROM herb_disease_associations hda\n  JOIN therapeutic_categories tc\n    ON tc.category_name = hda.disease_category\n  WHERE hda.association_id = {{ $json.association_id }}\n)\nINSERT INTO modern_studies_classified (\n  pmid,\n  herb_id,\n  category_id,\n  association_id,\n  study_type,\n  validation_level,\n  phytochemicals_identified,\n  biological_targets,\n  sample_size,\n  p_value,\n  significance_reported,\n  llm_confidence,\n  classification_notes\n)\nSELECT\n  {{ $json.pmid }},\n  {{ $json.herb_id }},\n  assoc.category_id,\n  {{ $json.association_id }},\n  '{{ $json.study_type }}',\n  '{{ $json.validation_level }}',\n  {{ $json.phytochemicals_identified && $json.phytochemicals_identified !== '{}' ? \"'\" + $json.phytochemicals_identified.replace(/'/g, \"''\") + \"'::text[]\" : 'NULL' }},\n  {{ $json.biological_targets && $json.biological_targets !== '{}' ? \"'\" + $json.biological_targets.replace(/'/g, \"''\") + \"'::text[]\" : 'NULL' }},\n  {{ $json.sample_size !== null ? $json.sample_size : 'NULL' }},\n  {{ $json.p_value !== null ? $json.p_value : 'NULL' }},\n  {{ $json.significance_reported }},\n  {{ $json.llm_confidence }},\n  {{ $json.classification_notes && $json.classification_notes.trim() !== '' ? \"'\" + $json.classification_notes.replace(/'/g, \"''\") + \"'\" : 'NULL' }}\nFROM assoc\nON CONFLICT (pmid, category_id) DO UPDATE SET\n  herb_id                  = EXCLUDED.herb_id,\n  association_id           = EXCLUDED.association_id,\n  study_type               = EXCLUDED.study_type,\n  validation_level         = EXCLUDED.validation_level,\n  phytochemicals_identified = EXCLUDED.phytochemicals_identified,\n  biological_targets       = EXCLUDED.biological_targets,\n  sample_size              = EXCLUDED.sample_size,\n  p_value                  = EXCLUDED.p_value,\n  significance_reported    = EXCLUDED.significance_reported,\n  llm_confidence           = EXCLUDED.llm_confidence,\n  classification_notes     = EXCLUDED.classification_notes;\n\nUPDATE modern_studies_raw\nSET study_classified = true,\n    processed        = true\nWHERE pmid           = {{ $json.pmid }}\n  AND association_id = {{ $json.association_id }};",
+        "options": {
+          "queryBatching": "transaction"
+        }
+      },
+      "name": "Batch insert classifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        320,
+        -64
+      ],
+      "id": "6d9cee8e-6fc5-4a59-b1ec-4522bd89c48c",
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_CREDENTIALS",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Minimal array/string cleanup only\nconst item = $input.item.json;\nreturn [{\n  json: {\n    ...item,\n    // Ensure arrays are arrays\n    phytochemicals: Array.isArray(item.phytochemicals) ? item.phytochemicals : [],\n    biological_targets: Array.isArray(item.biological_targets) ? item.biological_targets : [],\n    // Booleans/numbers safe already\n    significance_reported: Boolean(item.significance_reported),\n    llm_confidence: parseFloat(item.llm_confidence) || 0\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        -192
+      ],
+      "id": "6a529206-59f4-4640-a629-625b4377c7f7",
+      "name": "Sanitize data"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "classifications",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        -192
+      ],
+      "id": "e96b7ee2-e12b-43b3-a4b7-9016050215af",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst toTextArray = (arr) => {\n  if (!Array.isArray(arr) || arr.length === 0) return '{}';\n  const escapeSql = (v) => {\n    v = String(v);\n    v = v.replace(/'/g, \"''\");\n    v = v.replace(/\\\\/g, \"\\\\\\\\\");\n    v = v.replace(/\\0/g, '');\n    v = v.replace(/\"/g, '\\\\\"');\n    return `\"${v}\"`;\n  };\n  return `{${arr.map(escapeSql).join(',')}}`;\n};\n\nconst cleaned = [];\nfor (const item of items) {\n  const cls = item.json;\n\n  // ✅ CRITICAL: Use source_item to get ORIGINAL pmid from raw batch\n  // Never trust LLM-returned pmid\n  const trustedPmid = parseInt(cls.source_pmid || cls.pmid);\n  const trustedHerbId = parseInt(cls.source_herb_id || cls.herb_id);\n  const trustedAssocId = parseInt(cls.source_association_id || cls.association_id);\n\n  if (!trustedPmid || !trustedHerbId || !trustedAssocId) continue;\n\n  cleaned.push({\n    pmid: trustedPmid,          // ← From raw input, NOT LLM\n    herb_id: trustedHerbId,\n    association_id: trustedAssocId,\n    study_type: cls.study_type || 'review',\n    validation_level: cls.validation_level || 'insufficient',\n    phytochemicals_identified: toTextArray(cls.phytochemicals),\n    biological_targets: toTextArray(cls.biological_targets),\n    sample_size: cls.sample_size ? parseInt(cls.sample_size) : null,\n    p_value: cls.p_value ? parseFloat(cls.p_value) : null,\n    significance_reported: Boolean(cls.significance_reported),\n    llm_confidence: parseFloat(cls.llm_confidence) || 0.7,\n    classification_notes: '',\n    source_item: parseInt(cls.source_item) || null\n  });\n}\n\nconsole.log(`Prepared ${cleaned.length}/${items.length} records for DB`);\nreturn cleaned.map(item => ({ json: item }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        96,
+        -192
+      ],
+      "id": "d17ca08a-2fae-4f2e-a904-eb14c1ac1c91",
+      "name": "sanitize 2"
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1152,
+        -64
+      ],
+      "id": "1790c689-90a6-4b3a-b1a7-be38b38dc8c9",
+      "name": "Loop Over Items"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL Query": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse & Enrich Classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model with LiteLLM": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Enrich Classifications": {
+      "main": [
+        [
+          {
+            "node": "Sanitize data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize data": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "sanitize 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sanitize 2": {
+      "main": [
+        [
+          {
+            "node": "Batch insert classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch insert classifications": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "dc0936fd-7deb-495c-a563-b1b004a42c92",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d5916a4c66673608c0331fba7cbae52e9b88270bfdef6cbcbf8524d7b5d76f9b"
+  },
+  "nodeGroups": [],
+  "id": "daYLPAbzWCUW2kQ4",
+  "tags": [
+    {
+      "updatedAt": "2026-02-23T13:49:15.886Z",
+      "createdAt": "2026-02-23T13:49:15.886Z",
+      "id": "ofSjHgJLSeTDsJFO",
+      "name": "working"
+    }
+  ]
+}
