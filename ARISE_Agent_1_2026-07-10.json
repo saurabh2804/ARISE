@@ -1,0 +1,693 @@
+{
+  "name": "Agent 1_ARISE",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        528
+      ],
+      "id": "2dc8bae6-bd7c-46bb-b77f-e9cf0bda4290",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.gbif.org/v1/species/match?name={{ $json.gbif_search_term }}&strict=false",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1920,
+        16
+      ],
+      "id": "2d3301c8-246c-4ef4-9fdf-073281183e06",
+      "name": "HTTP GBIF"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\n// Use transformed GBIF fields\nconst has_gbif_key = !!item.speciesKey || !!item.gbif_id;\nconst gbif_conf = Number(item.gbif_confidence ?? item.confidence ?? 99) / 100;\nconst agent_conf = Number(item.confidence_score ?? item.prominence_priority ?? 0.7);\n\n// Trust the upstream gbif_success, but add safety\nconst is_nomatch = item.gbif_status?.toUpperCase().includes('NOMATCH') || \n                   item.gbif_match_type === 'NONE';\nconst validation_complete = item.gbif_success && has_gbif_key && !is_nomatch;\n\nconst classical_mentions = Number(item.classical_mentions ?? 1);\nconst validation_score = Math.min(1.0, \n  (classical_mentions / 10 * 0.4) +     \n  (gbif_conf * 0.4) +                   \n  (agent_conf * 0.2)                    \n);\n\nreturn [{\n  json: {\n    ...item,\n    prominence_score: validation_score.toFixed(4),\n    gbif_confidence: gbif_conf,\n    validation_complete,\n    gbif_status: item.gbif_status || 'UNKNOWN'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2592,
+        64
+      ],
+      "id": "7449c8c0-1760-42cc-934f-396615fbdd7b",
+      "name": "Calculate Prominence"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Classify + Resolve herb_id={{ $json.herb_id }}:\n\nHERB DETAILS:\n- Sanskrit: \"{{ $json.herb_sanskrit }}\"\n- Botanical/Common: \"{{ $json.botanical_name }}\" or \"{{ $json.common_name }}\"\n- Example: herb_id=1661, botanical_name=\"some name\", sanskrit_name=\"Bibhitaki\"\n\nRULES:\n1. **CLASSIFY** (priority):\n   - **Polyherbal** (Churna, Kwath, Gutika, Taila, multiple herbs): `\"polyherbal\"`\n   - **Animal** (Gomutra, Madhu, Majja, Ksheer): `\"animal\"`  \n   - **Mineral** (Lavana, Abhrak, Shilajit, Godanti): `\"mineral\"`\n   - **Single herb** → resolve below\n\n2. **SINGLE HERB**: Best Perenual/GBIF binomial from Sanskrit + names:\n   - Use `botanical_name` IF scientific (genus species)\n   - Refine with Sanskrit: Bibhitaki→\"Terminalia bellirica\", Adrak→\"Zingiber officinale\"\n   - Raw Sanskrit only → standard binomial\n   - Query Perenual with {{ $json.botanical_name }}\n   - If not in perenual, search SearXNG for herb information with \"{{ $json.botanical_name }} scientific name\"\n\n**ALWAYS RESPOND WITH ONE VALID JSON OBJECT** (no text, no XML, no tools). JSON structure:\n{\n  \"herb_id\": {{ $json.herb_id }},\n  \"classification\": \"single|polyherbal|animal|mineral\",\n  \"validated_botanical\": \"Terminalia bellirica\",\n  \"gbif_search_term\": \"Terminalia bellirica\",\n  \"confidence\": 0.95,\n  \"source\": \"llm\"\n}\n\nCRITICAL: JSON ONLY. No explanations. Invalid JSON breaks pipeline.\n",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        784,
+        -128
+      ],
+      "id": "0329b308-7826-45b7-9600-e44ef3a38617",
+      "name": "AI Agent",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsonMetadata": {},
+        "model": {
+          "__rl": true,
+          "value": "sarvam-105b",
+          "mode": "list",
+          "cachedResultName": "sarvam-105b"
+        },
+        "options": {}
+      },
+      "type": "@rlquilez/n8n-nodes-openai-litellm.lmChatOpenAiLitellm",
+      "typeVersion": 1.2,
+      "position": [
+        544,
+        128
+      ],
+      "id": "3f1c4493-5e00-413c-b152-555a6b3370cb",
+      "name": "OpenAI Chat Model with LiteLLM",
+      "credentials": {
+        "openAiApiWithLitellmApi": {
+          "id": "knaskQZbHfCWMJQM",
+          "name": "OpenAI with LiteLLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {
+          "numResults": 5,
+          "pageNumber": 1,
+          "safesearch": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolSearXng",
+      "typeVersion": 1,
+      "position": [
+        784,
+        96
+      ],
+      "id": "1819351d-1038-4a48-ad15-7c8e003deaa8",
+      "name": "Web search Herbs",
+      "credentials": {
+        "searXngApi": {
+          "id": "iLXAIeOAjmq80QAK",
+          "name": "SearXNG account"
+        }
+      },
+      "notes": "Search web for canonical botanical name of Ayurvedic herb if DB lacks match. Query: 'scientific name [sanskrit_name] OR [botanical_name] Ayurveda GBIF'."
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2368,
+        64
+      ],
+      "id": "5421c7ff-b1e5-481f-ad9e-44a1271f593a",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n v2+: Agent 1 Parse Node - GBIF Herb Resolver (returns ARRAY, preserves ALL)\ntry {\n  const item = $input.item.json;\n  let raw = item.output || item.text || item.content || item.message || item.choices?.[0]?.message?.content;\n  \n  if (!raw) {\n    console.log(\"No raw content found\");\n    return [{ \n      json: { \n        skipped: true, \n        reason: \"No output/text/content in agent response\",\n        input_herb_id: item.herb_id || 'unknown',\n        classification: 'unknown'\n      } \n    }];\n  }\n  \n  console.log(\"Raw agent output:\", raw.substring(0, 200));\n  \n  // Parse JSON (string/object) - handles ```json wrappers\n  let herbData;\n  if (typeof raw === 'string') {\n    const cleaned = raw.replace(/```json|```/g, '').trim();\n    herbData = JSON.parse(cleaned);\n  } else {\n    herbData = raw;\n  }\n  \n  const herbsArray = Array.isArray(herbData) ? herbData : [herbData];\n  \n  // ALWAYS map ALL herbs, preserve input_herb_id, flag singles\n  const validHerbs = herbsArray.map(h => ({\n    herb_id: h.herb_id || item.herb_id,  // Preserve e.g. 729\n    classification: h.classification || 'unknown',\n    validated_botanical: h.validated_botanical || '',\n    gbif_search_term: h.classification === 'single' ? (h.validated_botanical || h.gbif_search_term || h.herb || 'Unknown') : '',\n    confidence: Number(h.confidence || 0),\n    source: h.source || 'llm',\n    rawAgent: h,  // Debug\n    is_single_herb: h.classification === 'single' && (h.confidence ?? 0) >= 0.5\n  }));\n  \n  console.log(`Mapped ${validHerbs.length} herbs, singles: ${validHerbs.filter(h => h.is_single_herb).length}`);\n  \n  // Branch 1: Any singles? → GBIF path (filter to singles only)\n  if (validHerbs.some(h => h.is_single_herb)) {\n    return validHerbs\n      .filter(h => h.is_single_herb)\n      .map(h => ({ json: h }));\n  }\n  \n  // Branch 2: All non-singles → Non-herb path WITH full data\n  return validHerbs.map(h => ({ \n    json: { \n      ...h, \n      skipped: true,\n      reason: `Classification: ${h.classification} (conf: ${h.confidence})`\n    } \n  }));\n  \n} catch (e) {\n  console.error(\"Parse error:\", e.message);\n  return [{ \n    json: { \n      skipped: true, \n      reason: `Parse failed: ${e.message}`,\n      input_herb_id: $input.item.json.herb_id || 'unknown',\n      classification: 'parse_error'\n    } \n  }];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        -128
+      ],
+      "id": "4f79bc18-33ff-478e-95b2-aa7dc9e1fd56",
+      "name": "Parse"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1f3e5579-dded-4071-89f9-0913f6444fa1",
+              "leftValue": "={{ $json.classification === 'single' }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1472,
+        -128
+      ],
+      "id": "b0eb5c06-faf5-4f26-aa11-618f20b279ef",
+      "name": "IF monoherbal"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "322499f3-76dd-4500-a203-bc40a2b89a00",
+              "name": "herb_id",
+              "value": "={{ $json.herb_id }}",
+              "type": "number"
+            },
+            {
+              "id": "68973aa3-bd6d-41c9-9fb4-159b9ab045d1",
+              "name": "classification",
+              "value": "={{ $json.classification }}",
+              "type": "string"
+            },
+            {
+              "id": "1d66117d-c610-4943-b138-dfda382c90fc",
+              "name": "validated_botanical",
+              "value": "={{ $json.validated_botanical }}",
+              "type": "string"
+            },
+            {
+              "id": "1c8d9c22-5fa5-480a-b9a9-49257e3fe21e",
+              "name": "confidence",
+              "value": "={{ $json.confidence }}",
+              "type": "number"
+            },
+            {
+              "id": "a6b1fb5c-ab18-4d43-b199-bec12a95a091",
+              "name": "source",
+              "value": "={{ $json.source }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1696,
+        -176
+      ],
+      "id": "67ac3115-9047-4913-8569-e3e5d0cdef63",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE herbs_master\nSET \n  skip_reason = '{{ $json.classification }}: {{ $json.validated_botanical }}',\n  gbif_status = 'SKIP_{{ $json.classification.toUpperCase() }}',\n  substance_type = '{{ $json.classification }}',\n  gbif_note = '{{ $json.source }} (conf: {{ $json.confidence }})',\n  gbif_validated = false,\n  updated_at = CURRENT_TIMESTAMP\nWHERE herb_id = {{ $json.herb_id }};",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1920,
+        -176
+      ],
+      "id": "dd634259-0e1e-4249-bdca-4284d5f6078a",
+      "name": "non herb DB",
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "console.log('GBIF Input:', $input.item.json);\n// Especially: gbif_search_term, validated_botanical\nreturn $input.all();\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1696,
+        16
+      ],
+      "id": "0b3bd6c7-d874-4691-bb1c-315c98e88a4a",
+      "name": "Correct format"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE herb_disease_associations\nSET gbif_id = {{ $json.speciesKey ?? $json.usageKey ?? null }}::integer,\n    gbif_canonical_name = COALESCE('{{ $json.gbif_canonical_name ?? \"\" }}', ''),\n    gbif_family = COALESCE('{{ $json.gbif_family ?? \"\" }}', 'Unknown'),\n    gbif_genus = COALESCE('{{ $json.gbif_genus ?? \"\" }}', 'Unknown'),\n    gbif_status = COALESCE('{{ $json.gbif_status ?? \"NOMATCH\" }}', 'NOMATCH'),\n    gbif_match_type = COALESCE('{{ $json.gbif_match_type ?? \"EXACT\" }}', 'FUZZY'),\n    gbif_confidence = LEAST(GREATEST({{ $json.gbif_confidence ?? 0.99 }}, 0), 1),\n    gbif_validated = {{ $json.validation_complete ?? $json.gbif_success ?? false }},\n    updated_at = CURRENT_TIMESTAMP,\n    prominence_score = GREATEST(prominence_score, COALESCE({{ $json.prominence_score ?? 0 }}, 0))\nWHERE association_id = {{ $json.association_id }};\n\n-- STEP 2: herbs_master (your existing collision-safe logic)\nDO $$\nDECLARE\n  v_herb_id INTEGER := {{ $json.herb_id }};  -- 1073\n  v_botanical TEXT := '{{ $json.gbif_scientific_name ?? $json.botanical_name ?? \"Unknown\" }}';\n  v_family TEXT := '{{ $json.gbif_family ?? \"Unknown\" }}';\n  v_gbif_id INTEGER := {{ $json.speciesKey ?? $json.usageKey ?? null }};\n  v_validated BOOLEAN := {{ $json.validation_complete ?? false }};\n  v_owner_id INTEGER;\nBEGIN\n  SELECT herb_id INTO v_owner_id\n  FROM herbs_master WHERE LOWER(botanical_name) = LOWER(v_botanical) AND herb_id != v_herb_id LIMIT 1;\n\n  IF v_owner_id IS NULL THEN\n    UPDATE herbs_master SET\n      family = v_family,\n      gbif_id = v_gbif_id,\n      gbif_validated = v_validated,\n      validated_at = CASE WHEN v_validated THEN CURRENT_TIMESTAMP ELSE validated_at END,\n      classical_frequency = CASE WHEN NOT gbif_validated THEN COALESCE(classical_frequency, 0) + 1 ELSE classical_frequency END,\n      updated_at = CURRENT_TIMESTAMP,\n      skip_reason = NULL\n    WHERE herb_id = v_herb_id;\n  ELSE\n    -- Enrich owner + flag duplicate\n    UPDATE herbs_master SET\n      family = v_family,\n      gbif_id = v_gbif_id,\n      gbif_validated = v_validated,\n      validated_at = CASE WHEN v_validated THEN CURRENT_TIMESTAMP ELSE validated_at END,\n      updated_at = CURRENT_TIMESTAMP\n    WHERE herb_id = v_owner_id;\n\n    UPDATE herbs_master SET\n      gbif_validated = true,\n      skip_reason = 'duplicate:' || v_owner_id,\n      updated_at = CURRENT_TIMESTAMP\n    WHERE herb_id = v_herb_id;\n  END IF;\n\n  -- herb_canonical (your existing)\n  IF v_gbif_id IS NOT NULL THEN\n    INSERT INTO herb_canonical (canonical_gbif_id, master_herb_id, aliases)\n    VALUES (v_gbif_id, v_herb_id, ARRAY[]::integer[])\n    ON CONFLICT (canonical_gbif_id) DO UPDATE SET\n      master_herb_id = LEAST(herb_canonical.master_herb_id, EXCLUDED.master_herb_id),\n      aliases = CASE WHEN herb_canonical.aliases @> ARRAY[EXCLUDED.master_herb_id]\n                     THEN herb_canonical.aliases\n                     ELSE array_append(herb_canonical.aliases, EXCLUDED.master_herb_id) END;\n  END IF;\nEND $$;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2816,
+        240
+      ],
+      "id": "7aec77dd-bedb-4393-bd45-ae8a46fc4bde",
+      "name": "Final PostgreSQL node",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "BEGIN;\n\n-- ============================================================\n-- STEP 1: Backup tables\n-- ============================================================\nDROP TABLE IF EXISTS herbs_master_backup, herb_disease_associations_backup;\nCREATE TABLE herbs_master_backup AS SELECT * FROM herbs_master;\nCREATE TABLE herb_disease_associations_backup AS SELECT * FROM herb_disease_associations;\n\n-- ============================================================\n-- STEP 2: Rollup classical metrics to survivors\n-- ============================================================\nUPDATE herbs_master target\nSET\n  classical_frequency  = COALESCE(target.classical_frequency, 0) + COALESCE(src.total_freq, 0),\n  classical_prominence = GREATEST(COALESCE(target.classical_prominence, 0), COALESCE(src.max_prom, 0))\nFROM (\n  SELECT\n    hc.master_herb_id,\n    SUM(COALESCE(hm.classical_frequency, 0))::int AS total_freq,\n    MAX(COALESCE(hm.classical_prominence, 0)) AS max_prom\n  FROM herb_canonical hc\n  JOIN herbs_master hm ON hm.herb_id = ANY(COALESCE(hc.aliases, ARRAY[]::int[]))\n  WHERE hm.herb_id <> hc.master_herb_id\n  GROUP BY hc.master_herb_id\n) src\nWHERE target.herb_id = src.master_herb_id;\n\n-- ============================================================\n-- STEP 3: Fold alias associations (flatten + dedup arrays) — FIXED\n-- ============================================================\nDROP TABLE IF EXISTS tmp_alias_assoc_folded;\nCREATE TEMP TABLE tmp_alias_assoc_folded AS\nWITH flattened_sources AS (\n  SELECT\n    hc.master_herb_id AS herb_id,\n    hda.disease_id,\n    hda.disease_category,\n    hda.association_type,\n    hda.confidence_score,\n    hda.classical_mentions,\n    hda.prominence_score,\n    hda.source_texts,\n    hda.context_summary,\n    hda.extracted_at,\n    hda.chunk_id,\n    hda.chunk_ids\n  FROM herb_disease_associations hda\n  JOIN herb_canonical hc ON hda.herb_id = ANY(COALESCE(hc.aliases, ARRAY[]::int[]))\n  WHERE hda.herb_id <> hc.master_herb_id\n),\ngrouped AS (\n  SELECT\n    herb_id,\n    disease_id,\n    COALESCE(MAX(disease_category), 'General')      AS disease_category,\n    MAX(association_type)                            AS association_type,\n    MAX(COALESCE(confidence_score, 0))               AS confidence_score,\n    SUM(COALESCE(classical_mentions, 0))::int        AS classical_mentions,\n    MAX(COALESCE(prominence_score, 0))               AS prominence_score,\n    string_agg(\n      DISTINCT COALESCE(context_summary, ''),\n      E'\\n\\n'\n    ) FILTER (WHERE context_summary IS NOT NULL AND trim(context_summary) != '') AS context_summary,\n    MAX(extracted_at)                                AS extracted_at,\n    string_agg(DISTINCT chunk_id::text, ',')\n      FILTER (WHERE chunk_id IS NOT NULL)            AS chunk_id,\n    array_agg(st_elem) FILTER (WHERE st_elem IS NOT NULL AND trim(st_elem) != '') AS all_source_texts,\n    array_agg(ci_elem) FILTER (WHERE ci_elem IS NOT NULL AND trim(ci_elem) != '') AS all_chunk_ids\n  FROM flattened_sources\n  LEFT JOIN LATERAL unnest(source_texts) AS st_elem ON TRUE\n  LEFT JOIN LATERAL unnest(chunk_ids)    AS ci_elem ON TRUE\n  GROUP BY herb_id, disease_id\n)\nSELECT\n  herb_id,\n  disease_id,\n  disease_category,\n  association_type,\n  confidence_score,\n  classical_mentions,\n  prominence_score,\n  (SELECT ARRAY_AGG(DISTINCT v ORDER BY v)\n   FROM unnest(all_source_texts) AS v\n   WHERE v IS NOT NULL AND trim(v) != '') AS source_texts,\n  context_summary,\n  extracted_at,\n  chunk_id,\n  (SELECT ARRAY_AGG(DISTINCT v ORDER BY v)\n   FROM unnest(all_chunk_ids) AS v\n   WHERE v IS NOT NULL AND trim(v) != '') AS chunk_ids\nFROM grouped;\n\n-- ============================================================\n-- STEP 4: Merge into existing master rows\n-- ============================================================\nUPDATE herb_disease_associations target\nSET\n  confidence_score   = GREATEST(target.confidence_score, src.confidence_score),\n  classical_mentions = target.classical_mentions + src.classical_mentions,\n  prominence_score   = GREATEST(target.prominence_score, src.prominence_score),\n  disease_category   = COALESCE(src.disease_category, target.disease_category),\n  source_texts = (\n    SELECT ARRAY_AGG(DISTINCT txt ORDER BY txt)\n    FROM (\n      SELECT unnest::text AS txt FROM unnest(target.source_texts) WHERE unnest IS NOT NULL\n      UNION\n      SELECT unnest::text AS txt FROM unnest(src.source_texts) WHERE unnest IS NOT NULL\n    ) AS all_sources\n    WHERE txt != ''\n  ),\n  context_summary = CASE\n    WHEN trim(COALESCE(target.context_summary, '')) = '' THEN COALESCE(src.context_summary, '')\n    WHEN trim(COALESCE(src.context_summary, '')) = '' THEN target.context_summary\n    ELSE target.context_summary || E'\\n\\n' || src.context_summary\n  END,\n  extracted_at = GREATEST(target.extracted_at, src.extracted_at),\n  chunk_ids = (\n    SELECT ARRAY_AGG(DISTINCT txt ORDER BY txt)\n    FROM (\n      SELECT unnest::text AS txt FROM unnest(target.chunk_ids) WHERE unnest IS NOT NULL\n      UNION\n      SELECT unnest::text AS txt FROM unnest(src.chunk_ids) WHERE unnest IS NOT NULL\n    ) AS all_chunks\n    WHERE txt != ''\n  )\nFROM tmp_alias_assoc_folded src\nWHERE target.herb_id = src.herb_id\n  AND target.disease_id = src.disease_id;\n\n-- ============================================================\n-- STEP 5: Insert new associations for master (no existing row)\n-- ============================================================\nINSERT INTO herb_disease_associations (\n  herb_id, disease_id, disease_category, association_type,\n  confidence_score, classical_mentions, prominence_score,\n  source_texts, context_summary, extracted_at,\n  chunk_id, chunk_ids\n)\nSELECT\n  herb_id, disease_id, disease_category, association_type,\n  confidence_score, classical_mentions, prominence_score,\n  COALESCE(source_texts, ARRAY[]::text[]),\n  context_summary,\n  extracted_at,\n  NULLIF(trim(chunk_id), '') AS chunk_id,\n  COALESCE(chunk_ids, ARRAY[]::text[])\nFROM tmp_alias_assoc_folded src\nWHERE NOT EXISTS (\n  SELECT 1 FROM herb_disease_associations existing\n  WHERE existing.herb_id = src.herb_id\n    AND existing.disease_id = src.disease_id\n)\nON CONFLICT DO NOTHING;\n\n-- ============================================================\n-- STEP 6: Delete alias herb_disease_associations\n-- ============================================================\nDELETE FROM herb_disease_associations hda\nUSING herb_canonical hc\nWHERE hda.herb_id <> hc.master_herb_id\n  AND hc.aliases @> ARRAY[hda.herb_id];\n\n-- STEP 7a: Merge chained aliases into parent rows\nUPDATE herb_canonical parent\nSET aliases = (\n  SELECT ARRAY_AGG(DISTINCT a ORDER BY a)\n  FROM (\n    SELECT unnest(COALESCE(parent.aliases, ARRAY[]::int[])) AS a\n    UNION\n    SELECT unnest(COALESCE(child.aliases, ARRAY[]::int[])) AS a\n    FROM herb_canonical child\n    WHERE parent.aliases @> ARRAY[child.master_herb_id]\n      AND child.master_herb_id <> parent.master_herb_id\n    UNION\n    SELECT child.master_herb_id AS a\n    FROM herb_canonical child\n    WHERE parent.aliases @> ARRAY[child.master_herb_id]\n      AND child.master_herb_id <> parent.master_herb_id\n  ) all_aliases\n  WHERE a <> parent.master_herb_id\n)\nFROM herb_canonical child\nWHERE parent.aliases @> ARRAY[child.master_herb_id]\n  AND child.master_herb_id <> parent.master_herb_id;\n\n-- STEP 7b: Delete the now-redundant chained child rows\nDELETE FROM herb_canonical child\nUSING herb_canonical parent\nWHERE parent.aliases @> ARRAY[child.master_herb_id]\n  AND child.master_herb_id <> parent.master_herb_id\n  AND parent.canonical_gbif_id <> child.canonical_gbif_id;\n\n-- STEP 7c: Delete alias rows from herbs_master (now FK-safe)\nDELETE FROM herbs_master hm\nUSING herb_canonical hc\nWHERE hm.herb_id <> hc.master_herb_id\n  AND hc.aliases @> ARRAY[hm.herb_id];\n\n-- ============================================================\n-- STEP 8: Remove any remaining duplicates + enforce constraint\n-- ============================================================\nDELETE FROM herb_disease_associations\nWHERE ctid NOT IN (\n  SELECT MIN(ctid)\n  FROM herb_disease_associations\n  GROUP BY herb_id, disease_id\n);\n\nALTER TABLE herb_disease_associations\n  DROP CONSTRAINT IF EXISTS herb_disease_associations_herb_disease_key;\nALTER TABLE herb_disease_associations\n  ADD CONSTRAINT herb_disease_associations_herb_disease_key\n  UNIQUE (herb_id, disease_id);\n\nCOMMIT;\n\n-- Results\nSELECT 'unique_herbs'    AS metric, COUNT(*)::text AS value FROM herbs_master\nUNION ALL\nSELECT 'unique_assocs',  COUNT(*)::text FROM herb_disease_associations\nUNION ALL\nSELECT 'canonical_merged', COUNT(*)::text FROM herb_canonical\nWHERE ARRAY_LENGTH(aliases, 1) > 0;",
+        "options": {}
+      },
+      "id": "dc768f7f-d3fd-45c4-a7dc-26e1ca8ab924",
+      "name": "Merge Duplicate Herbs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        432,
+        352
+      ],
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT\n  hm.herb_id,\n  hm.botanical_name,\n  hm.sanskrit_name, \n  hm.common_name,\n  COALESCE(hm.classical_prominence, 1.0) as prominence_priority\nFROM herbs_master hm\nLEFT JOIN herb_disease_associations hda ON hm.herb_id = hda.herb_id\nWHERE hm.gbif_id IS NULL \n  AND hm.skip_reason IS NULL\n  AND hm.substance_type = 'plant'\n  AND hda.herb_id IS NULL  -- Orphan filter\nGROUP BY hm.herb_id, hm.botanical_name, hm.sanskrit_name, hm.common_name\nORDER BY prominence_priority DESC, hm.herb_id;\n",
+        "options": {}
+      },
+      "id": "630966c8-a3ea-493d-8a7a-70cf893c9961",
+      "name": "Orphan herbs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -16,
+        624
+      ],
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        208,
+        432
+      ],
+      "id": "75dd46c4-0309-47e0-bea4-b77b5bc23b2c",
+      "name": "Loop Over herbs"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Execute a SQL query in Postgres",
+        "operation": "executeQuery",
+        "query": "SELECT \n  herb_id, botanical_name, sanskrit_name, common_name, gbif_id, skip_reason,\n  (SELECT COUNT(*) FROM herbs_master WHERE skip_reason IS NULL AND gbif_id IS NULL) as total_pending\nFROM herbs_master \nWHERE skip_reason IS NULL \n  AND gbif_id IS NULL\n  AND LENGTH(botanical_name) <= 20  -- Short names first\nORDER BY classical_prominence DESC  -- High-value first\nLIMIT 1;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        912,
+        96
+      ],
+      "id": "fc728bab-3456-4f5a-9470-aeeb25a51841",
+      "name": "Dynamic input selector",
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://perenual.com/api/species-list?key=sk-BGj369d3b7e287bc016172&q={{ $('Wait').item.json.botanical_name }}",
+        "options": {
+          "sendCredentialsOnCrossOriginRedirect": false
+        }
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        96
+      ],
+      "id": "28f4eb2b-6daa-40f1-aa32-4d93572af203",
+      "name": "perenual search"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        432,
+        -128
+      ],
+      "id": "25fa9599-7c04-4fe9-a19a-7d0f7962d240",
+      "name": "Wait",
+      "webhookId": "618e8a84-cecd-4476-8929-5c91f5084018"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nconst has_key = !!item.usageKey;\nconst is_plant = item.kingdom === 'Plantae';\nconst good_status = ['ACCEPTED', 'SYNONYM'].includes(item.status);\nconst good_match = ['EXACT', 'FUZZY'].includes(item.matchType);\nconst good_conf = Number(item.confidence ?? 0) >= 90;\n\nconst gbif_success = has_key && is_plant && good_status && good_match && !!item.family;\n\nreturn [{\n  json: {\n    ...item,\n    gbif_id: item.usageKey ?? null,\n    gbif_scientific_name: item.scientificName ?? null,\n    gbif_canonical_name: item.canonicalName ?? null,\n    gbif_family: item.family ?? null,\n    gbif_genus: item.genus ?? null,\n    gbif_species: item.species ?? null,\n    gbif_confidence: Number(item.confidence ?? 0),\n    gbif_match_type: item.matchType ?? null,\n    gbif_status: item.status ?? null,\n    gbif_success\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2144,
+        16
+      ],
+      "id": "e0b44c7a-6fbe-470e-ba1e-2923fc4bb83c",
+      "name": "Parse GBIF results"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (hm.herb_id)\n  hm.herb_id,\n  hda.association_id,\n  hm.sanskrit_name,\n  hm.botanical_name,\n  hm.common_name,\n  hm.family,\n  hm.gbif_id,\n  hm.gbif_status,\n  hm.gbif_validated,\n  hm.skip_reason,\n  hm.substance_type,\n  hda.prominence_score,\n  hda.disease_id,\n  dm.sanskrit_name AS disease_sanskrit_name\nFROM herbs_master hm\nJOIN herb_disease_associations hda ON hm.herb_id = hda.herb_id\nJOIN diseases_master dm ON hda.disease_id = dm.disease_id\nWHERE\n  COALESCE(hm.substance_type, 'plant') = 'plant'\n  AND COALESCE(hm.skip_reason, '') NOT LIKE 'duplicate:%'\n  AND COALESCE(hm.gbif_status, '') NOT LIKE 'SKIP_%'\n  AND COALESCE(hm.gbif_validated, FALSE) = FALSE\n  AND hm.gbif_id IS NULL\n  AND hm.herb_id = 5417\n  AND hda.association_type = 'indicated'\nORDER BY \n  hm.herb_id,\n  hda.prominence_score DESC NULLS LAST,\n  hda.association_id ASC\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "d4a49013-ae01-4f90-9262-27915c8a1bdb",
+      "name": "GBIF Herb specific que",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -16,
+        432
+      ],
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Orphan herbs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GBIF Herb specific que",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP GBIF": {
+      "main": [
+        [
+          {
+            "node": "Parse GBIF results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Prominence": {
+      "main": [
+        [
+          {
+            "node": "Final PostgreSQL node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over herbs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model with LiteLLM": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Web search Herbs": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Calculate Prominence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "IF monoherbal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF monoherbal": {
+      "main": [
+        [
+          {
+            "node": "Correct format",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "non herb DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "non herb DB": {
+      "main": [
+        [
+          {
+            "node": "Loop Over herbs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Correct format": {
+      "main": [
+        [
+          {
+            "node": "HTTP GBIF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final PostgreSQL node": {
+      "main": [
+        [
+          {
+            "node": "Loop Over herbs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orphan herbs": {
+      "main": [
+        []
+      ]
+    },
+    "Loop Over herbs": {
+      "main": [
+        [
+          {
+            "node": "Merge Duplicate Herbs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dynamic input selector": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "perenual search": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GBIF results": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GBIF Herb specific que": {
+      "main": [
+        [
+          {
+            "node": "Loop Over herbs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "12d2522a-9edb-489f-a6cc-6c4a3205b0b2",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d5916a4c66673608c0331fba7cbae52e9b88270bfdef6cbcbf8524d7b5d76f9b"
+  },
+  "nodeGroups": [],
+  "id": "siqwDSSSvHRL8gLm",
+  "tags": [
+    {
+      "updatedAt": "2026-02-23T13:49:15.886Z",
+      "createdAt": "2026-02-23T13:49:15.886Z",
+      "id": "ofSjHgJLSeTDsJFO",
+      "name": "working"
+    }
+  ]
+}
