@@ -1,0 +1,609 @@
+{
+  "name": "ARISE_Agent0_FINAL_2026-07-10",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "eb733682-d8e4-474a-a911-ae0d4ab681f6",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        3936
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "48063a2a-bde8-4d38-b02f-bb5c938a79a3",
+      "name": "Loop: Each Disease",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -80,
+        3936
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "dc23238b-6b8e-4175-aa31-7f61be586bb0",
+      "name": "Validation Loop Back",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1792,
+        3936
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE herb_disease_associations hda\nSET prominence_score = (\n  CAST(hda.classical_mentions AS DECIMAL) / \n  NULLIF((SELECT classical_frequency FROM herbs_master WHERE herb_id = hda.herb_id), 0)\n) * COALESCE(hda.confidence_score, 0.85)\nWHERE prominence_score IS NULL OR prominence_score = 0;\n\nSELECT \n  COUNT(DISTINCT herb_id) as total_herbs,\n  COUNT(DISTINCT disease_id) as total_diseases,\n  COUNT(*) as total_associations,\n  AVG(prominence_score) as avg_prominence,\n  AVG(confidence_score) as avg_confidence\nFROM herb_disease_associations;",
+        "options": {}
+      },
+      "id": "f1895a9b-ebe2-428a-a3ab-966613a20e8d",
+      "name": "Calculate Statistics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        416,
+        3360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $input.item.json;\n\nreturn [{\n  json: {\n    success: true,\n    timestamp: new Date().toISOString(),\n    method: 'TM2 Expanded (150 diseases)',\n    summary: {\n      totalHerbs: stats.total_herbs,\n      totalDiseases: stats.total_diseases,\n      totalAssociations: stats.total_associations,\n      avgProminence: parseFloat(stats.avg_prominence || 0).toFixed(3),\n      avgConfidence: parseFloat(stats.avg_confidence || 0).toFixed(3),\n      corpusCoverage: '~90%'\n    },\n    message: `✅ Agent 0 Complete! Extracted ${stats.total_associations} herb-disease associations from ${stats.total_herbs} herbs and ${stats.total_diseases} diseases using Expanded TM2 (150) + Qdrant + Sarvam AI.`\n  }\n}];\n"
+      },
+      "id": "afab67c2-a221-492d-9b02-aad63fd952c1",
+      "name": "Final Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        3360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH herb AS (\n    INSERT INTO herbs_master (botanical_name, sanskrit_name, common_name, classical_prominence, validated_at)\n    VALUES (\n        '{{ String($json.herb_scientific || $json.herb_name).replace(/'/g, \"''\") }}',\n        '{{ String($json.herb_sanskrit).replace(/'/g, \"''\") }}',\n        '{{ String($json.herb_name).replace(/'/g, \"''\") }}',\n        GREATEST(1, {{ Math.round(Number($json.confidence || 0.5) * 10) }}),\n        CURRENT_TIMESTAMP\n    )\n    ON CONFLICT (botanical_name) DO UPDATE SET\n        sanskrit_name = COALESCE(NULLIF(EXCLUDED.sanskrit_name, ''), herbs_master.sanskrit_name),\n        common_name = COALESCE(NULLIF(EXCLUDED.common_name, ''), herbs_master.common_name),\n        classical_prominence = GREATEST(herbs_master.classical_prominence, {{ Math.round(Number($json.confidence || 0.5) * 10) }}),\n        classical_frequency = herbs_master.classical_frequency + 1,\n        updated_at = CURRENT_TIMESTAMP\n    RETURNING herb_id\n),\ndisease AS (\n    INSERT INTO diseases_master (sanskrit_name, english_name, icd11_code, disease_category, mapping_confidence, mapping_method)\n    VALUES (\n        '{{ String($json.disease_sanskrit || \"Unknown\").replace(/'/g, \"''\") }}',\n        '{{ String($json.disease_english || \"Unknown\").replace(/'/g, \"''\") }}',\n        '{{ String($json.icd11_code || \"TM26.00\").replace(/'/g, \"''\") }}',\n        '{{ String($json.disease_category || \"General\").replace(/'/g, \"''\") }}',\n        {{ Number($json.confidence || 0.5) }},\n        'agent-extracted'\n    )\n    ON CONFLICT (sanskrit_name) DO UPDATE SET\n        english_name = EXCLUDED.english_name,\n        mapping_confidence = GREATEST(diseases_master.mapping_confidence, EXCLUDED.mapping_confidence),\n        updated_at = CURRENT_TIMESTAMP\n    RETURNING disease_id\n)\nINSERT INTO herb_disease_associations (\n    herb_id, disease_id, disease_category, association_type, confidence_score,\n    classical_mentions, source_texts, context_summary, extracted_at,\n    prominence_score, corpus_batch, properties, evidence_context, original_disease_id,\n    chunk_id, chunk_ids\n)\nSELECT\n    herb.herb_id,\n    disease.disease_id,\n    '{{ String($json.disease_category || \"General\").replace(/'/g, \"''\") }}',\n    '{{ [\"indicated\",\"contraindicated\",\"neutral\",\"unknown\"].includes($json.association) ? $json.association : \"indicated\" }}',\n    {{ Math.min(1, Math.max(0, Number($json.confidence || 0.5))) }},\n    1,\n    ARRAY['{{ String($json.source || \"TM2-150-Expanded\").replace(/'/g, \"''\") }}']::text[],\n    '{{ String($json.context || \"\").replace(/'/g, \"''\") }}',\n    '{{ String($json.extracted_at || $now.toISOString()).replace(/'/g, \"''\") }}'::timestamp,\n    {{ Math.min(0.9999, Math.max(0, Number($json.confidence || 0.5))) }},\n    'TM2-v1',\n    '{{ String($json.properties || \"\").replace(/'/g, \"''\") }}',\n    '{{ String($json.full_data_json || \"\").replace(/'/g, \"''\") }}',\n    {{ $json.original_disease_id || 'NULL' }},\n    '{{ String($json.chunk_id || \"\").replace(/'/g, \"''\") }}',\n    ARRAY['{{ String($json.chunk_id || \"\").replace(/'/g, \"''\") }}']::text[]\nFROM herb, disease\nON CONFLICT (herb_id, disease_id) DO UPDATE SET\n    -- Only increment mentions & merge data if this chunk_id is genuinely new\n    classical_mentions = CASE\n        WHEN EXCLUDED.chunk_id IS NOT NULL\n         AND EXCLUDED.chunk_id != ''\n         AND NOT (herb_disease_associations.chunk_ids @> ARRAY[EXCLUDED.chunk_id])\n        THEN herb_disease_associations.classical_mentions + 1\n        ELSE herb_disease_associations.classical_mentions\n    END,\n    source_texts = CASE\n        WHEN EXCLUDED.chunk_id IS NOT NULL\n         AND EXCLUDED.chunk_id != ''\n         AND NOT (herb_disease_associations.chunk_ids @> ARRAY[EXCLUDED.chunk_id])\n        THEN ARRAY(SELECT DISTINCT unnest(herb_disease_associations.source_texts || EXCLUDED.source_texts))\n        ELSE herb_disease_associations.source_texts\n    END,\n    chunk_ids = CASE\n        WHEN EXCLUDED.chunk_id IS NOT NULL\n         AND EXCLUDED.chunk_id != ''\n         AND NOT (herb_disease_associations.chunk_ids @> ARRAY[EXCLUDED.chunk_id])\n        THEN ARRAY(SELECT DISTINCT unnest(herb_disease_associations.chunk_ids || ARRAY[EXCLUDED.chunk_id]))\n        ELSE herb_disease_associations.chunk_ids\n    END,\n    chunk_id = COALESCE(NULLIF(EXCLUDED.chunk_id, ''), herb_disease_associations.chunk_id),\n    confidence_score = GREATEST(herb_disease_associations.confidence_score, EXCLUDED.confidence_score),\n    context_summary = COALESCE(NULLIF(EXCLUDED.context_summary, ''), herb_disease_associations.context_summary),\n    properties = COALESCE(NULLIF(EXCLUDED.properties, ''), herb_disease_associations.properties),\n    evidence_context = COALESCE(NULLIF(EXCLUDED.evidence_context, ''), herb_disease_associations.evidence_context),\n    prominence_score = GREATEST(herb_disease_associations.prominence_score, EXCLUDED.prominence_score)\nRETURNING association_id;",
+        "options": {}
+      },
+      "id": "4ff9ec16-01d0-49d7-b677-f7c4dfd68ce5",
+      "name": "Store All (PostgreSQL)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1568,
+        3936
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "sMacPJvBxk2PM6AF",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2016,
+        4016
+      ],
+      "id": "293e2387-ee2e-4d61-962e-fe56ba47d824",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Disease: {{ $json.primary_sanskrit }} ({{ $json.primary_english }}) {{ $json.devanagari }}\nICD: {{ $json.icd }}\nCategory: {{ $json.category }}\nID: {{ $json.id }}\n\n\n**MANDATORY workflow:**\n1. **Qdrant retrieval:** Sequentially search:\n   - \"herb indicated in {{ $json.primary_sanskrit }}\"\n   - \"plant indicated in {{ $json.primary_english }}\"\n   - \"auṣadhi indicated in {{ $json.devanagari }}\"\n   \n   → From chunks, **extract PLANT HERBS ONLY** (skip therapies: Taila/Nasya/Basti/Lepa/Abhyanga/Shirodhara/Virechana/Vamana; skip non-plants: Godugdha/Takra/Gghrita/minerals/metals).\n   \n   → Keep exact context text + chunk_id for each herb.\n\n2. **Botanical resolution** (ONE herb at a time):\n   - Use training data if known.\n   - Else: SearXNG ONCE: `[herb name] plant scientific name` (exact format, no extras).\n   - Take top 2-3 results → botanical name or `\"botanical unverified\"`.\n   - Format: `\"<Sanskrit> (<botanical or 'botanical unverified'>)\"`\n\n3. **Classify** from Qdrant context: `indicated` / `contraindicated` / `neutral`\n\n**CRITICAL FORMAT:**\n- ONLY raw JSON object. No markdown/explanation.\n- No herbs: {\"pairs\": []}\n- Top key: \"pairs\"\n- Every pair needs: herb, disease, diseaseEnglish, icd11Code, association, confidence (NUMBER 0.3-1.0), context (≤150 chars), properties (ARRAY), chunk_id\n\n**Example JSON:**\n{\n  \"pairs\": [\n    {\n      \"herb\": \"Guduchi (Tinospora cordifolia)\",\n      \"disease\": \"{{ $json.primary_sanskrit }}\",\n      \"diseaseEnglish\": \"{{ $json.primary_english }}\",\n      \"icd11_code\": \"{{ $json.icd }}\",\n      \"association\": \"indicated\",\n      \"confidence\": 0.85,\n      \"context\": \"exact Qdrant quote ≤150 chars\",\n      \"properties\": [\"antipyretic\", \"immunomodulator\"],\n      \"chunk_id\": \"chunk-123\"\n    }\n  ]\n}",
+        "hasOutputParser": true,
+        "options": {}
+      },
+      "id": "a26c8948-606b-4cb9-a808-975eb7671f5d",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "position": [
+        304,
+        3760
+      ],
+      "typeVersion": 2,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "28c16fc1-c555-489b-8ea7-3f71f3fc1be2",
+              "name": "herb_sanskrit",
+              "value": "={{ $json.herb_sanskrit }}",
+              "type": "string"
+            },
+            {
+              "id": "22361373-88d0-48e8-8bc6-f3aeb421080e",
+              "name": "confidence",
+              "value": "={{ $json.confidence }}",
+              "type": "number"
+            },
+            {
+              "id": "a55432f4-afc5-42dc-9a75-fad67f088dca",
+              "name": "association",
+              "value": "={{ $json.association }}",
+              "type": "string"
+            },
+            {
+              "id": "9ec61f07-3d68-4759-90d1-cae647c4c993",
+              "name": "disease_sanskrit",
+              "value": "={{ $json.disease_sanskrit }}",
+              "type": "string"
+            },
+            {
+              "id": "c19b08c4-35a2-4e19-868c-658bdb5eb678",
+              "name": "disease_english",
+              "value": "={{ $json.disease_english }}",
+              "type": "string"
+            },
+            {
+              "id": "00abcc75-176d-4e37-bf56-bb630fdb9791",
+              "name": "icd11_code",
+              "value": "={{ $json.icd11_code }}",
+              "type": "string"
+            },
+            {
+              "id": "d2b987b7-8c34-477e-89e0-8808b05daad3",
+              "name": "disease_category",
+              "value": "={{ $json.disease_category }}",
+              "type": "string"
+            },
+            {
+              "id": "547f8a4c-b374-4bbf-a11e-e34ed48a545b",
+              "name": "extracted_at",
+              "value": "={{new Date().toISOString()}}",
+              "type": "string"
+            },
+            {
+              "id": "02f21fe1-855c-48ae-8d89-e8e0fc0a728c",
+              "name": "full_data_json",
+              "value": "={{ JSON.stringify($json) }}",
+              "type": "string"
+            },
+            {
+              "id": "5957edc9-c9c2-43e8-9ccf-d3a1e74e232c",
+              "name": "herb_scientific",
+              "value": "={{ $json.herb_scientific }}",
+              "type": "string"
+            },
+            {
+              "id": "6284b4e6-672a-4844-acba-d9836df8dfeb",
+              "name": "herb_name",
+              "value": "={{ $json.herb }}",
+              "type": "string"
+            },
+            {
+              "id": "e6d7eac4-51b8-42b3-b9ec-b529ac618d09",
+              "name": "context",
+              "value": "={{ $json.context }}",
+              "type": "string"
+            },
+            {
+              "id": "71e025eb-110c-456c-aa03-26cd1d31444d",
+              "name": "properties",
+              "value": "={{ $json.properties }}",
+              "type": "string"
+            },
+            {
+              "id": "23e1403d-3d92-448e-a1e8-538bda85c7c8",
+              "name": "chunk_id",
+              "value": "={{ $json.chunk_id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1344,
+        3936
+      ],
+      "id": "bc653935-609f-406d-a8c4-81cb982acfd9",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// ARISE Agent 0: Parse & Filter Node\n// FULLY CONSOLIDATED WORKING VERSION\n// ============================================\n// This version fixes null value leakage by:\n// 1. Separating valid results from skipped results\n// 2. Returning ONLY valid items to downstream nodes\n// 3. Logging skipped items for audit trail\n// ============================================\n\nconst input = $input.item.json;\n\n// ── DEBUG: Input structure validation ────────────────────────────────────────\nconsole.log('=== ARISE Agent 0 Parser Started ===');\nconsole.log('Input structure keys:', Object.keys(input));\nconsole.log('Has output?', 'output' in input);\nconsole.log('Has pairs?', 'pairs' in input);\nconsole.log('Has output.pairs?', input.output?.pairs ? 'Yes' : 'No');\n\n// ── STEP 1: Extract pairs array ─────────────────────────────────────────────\nconst pairs = input.output?.pairs || input.pairs || [];\nconsole.log(`Found ${pairs.length} pairs in input`);\n\n// ── STEP 2: Handle empty pairs ──────────────────────────────────────────────\nif (!Array.isArray(pairs) || pairs.length === 0) {\n  console.log('⚠️ No pairs found - returning skipped item');\n  return [{ json: {\n    skipped: true,\n    reason: 'no_pairs_found',\n    debug: 'pairs array empty or missing',\n    disease_sanskrit: input.primary_sanskrit || 'Unknown',\n    extracted_at: new Date().toISOString()\n  } }];\n}\n\n// ── STEP 3: Confidence filter (≥0.7) ────────────────────────────────────────\nconst filteredPairs = pairs.filter(pair => (pair.confidence || 0) >= 0.7);\nconsole.log(`${filteredPairs.length} pairs after confidence filter (≥0.7)`);\n\nif (filteredPairs.length === 0) {\n  console.log('⚠️ No high-confidence pairs - returning skipped item');\n  return [{ json: {\n    skipped: true,\n    reason: 'no_high_confidence_pairs',\n    total_pairs: pairs.length,\n    max_confidence: Math.max(...pairs.map(p => p.confidence || 0)),\n    disease_sanskrit: input.primary_sanskrit || 'Unknown',\n    extracted_at: new Date().toISOString()\n  } }];\n}\n\n// ── STEP 4: BOTANICAL LOOKUP TABLE ──────────────────────────────────────────\n// Comprehensive lookup from ARISE knowledgebase [1][3][4][5][7][8][9]\nconst botanicalLookup = {\n// ── Devanagari (Sanskrit) ────────────────────────────────────────────────────\n'हरितकी': 'Terminalia chebula',\n'हरीतकी': 'Terminalia chebula',\n'पिप्पली': 'Piper longum',\n'कुटज': 'Holarrhena antidysenterica',\n'कौटजं': 'Holarrhena antidysenterica',\n'चित्रक': 'Plumbago zeylanica',\n'चित्रकः': 'Plumbago zeylanica',\n'शतावरी': 'Asparagus racemosus',\n'महाशतावरी': 'Asparagus racemosus',\n'गुडूची': 'Tinospora cordifolia',\n'गुदूची': 'Tinospora cordifolia',\n'गृडची': 'Tinospora cordifolia',\n'अमलकी': 'Phyllanthus emblica',\n'अमृता': 'Tinospora cordifolia',\n'हरिद्रा': 'Curcuma longa',\n'Shatapushpa': 'Anethum graveolens',\n'Dhanyaka': 'Coriandrum sativum',\n'Shigru': 'Moringa oleifera',\n'Kaseruka': 'Scirpus grossus',\n'Sringataka': 'Trapa natans',\n'Sarala': 'Pinus roxburghii',\n'दारुहरिद्रा': 'Berberis aristata',\n'दार्वीत्वक्': 'Berberis aristata',\n'नीम': 'Azadirachta indica',\n'निम्ब': 'Azadirachta indica',\n'निम्बक': 'Azadirachta indica',\n'निम्बकः': 'Azadirachta indica',\n'निम्बः': 'Azadirachta indica',\n'वासा': 'Adhatoda vasica',\n'वृष': 'Adhatoda vasica',\n'अडूसा': 'Adhatoda vasica',\n'करंज': 'Pongamia pinnata',\n'करवीर': 'Nerium oleander',\n'करवीरः': 'Nerium oleander',\n'शालिपर्णी': 'Desmodium gangeticum',\n'शालपर्णी': 'Desmodium gangeticum',\n'शायिपर्णी': 'Desmodium gangeticum',\n'वरूण': 'Crataeva nurvala',\n'अशोक': 'Saraca asoca',\n'अशोकः': 'Saraca asoca',\n'आशोक': 'Saraca asoca',\n'वट': 'Ficus benghalensis',\n'उशीर': 'Vetiveria zizanioides',\n'उशीरम्': 'Vetiveria zizanioides',\n'पाठा': 'Cissampelos pareira',\n'लोध्र': 'Symplocos racemosa',\n'लोध्रः': 'Symplocos racemosa',\n'तेजपत्र': 'Cinnamomum tamala',\n'त्वक': 'Cinnamomum zeylanicum',\n'त्वक्': 'Cinnamomum zeylanicum',\n'विदारी': 'Pueraria tuberosa',\n'विदारिका': 'Pueraria tuberosa',\n'अश्वगंधा': 'Withania somnifera',\n'अश्वगन्धा': 'Withania somnifera',\n'सुंठी': 'Zingiber officinale',\n'शुण्ठी': 'Zingiber officinale',\n'मरिच': 'Piper nigrum',\n'तुलसी': 'Ocimum tenuiflorum',\n'अर्जुन': 'Terminalia arjuna',\n'मंजिष्ठा': 'Rubia cordifolia',\n'एला': 'Elettaria cardamomum',\n'काकनासा': 'Solanum xanthocarpum',\n'काकमाची': 'Solanum nigrum',\n'पुनर्नवा': 'Boerhavia diffusa',\n'भृंगराज': 'Eclipta prostrata',\n'भृङ्गराजः': 'Eclipta prostrata',\n'मुस्ता': 'Cyperus rotundus',\n'मुस्त': 'Cyperus rotundus',\n'विदंग': 'Embelia ribes',\n'विडंग': 'Embelia ribes',\n'ब्राह्मी': 'Bacopa monnieri',\n'जटामांसी': 'Nardostachys jatamansi',\n'खदिर': 'Acacia catechu',\n'पटोल': 'Trichosanthes dioica',\n'कुष्ठ': 'Saussurea costus',\n'रास्ना': 'Pluchea lanceolata',\n'बला': 'Sida cordifolia',\n'देवदारु': 'Cedrus deodara',\n'गुग्गुलु': 'Commiphora mukul',\n'दशमूल': 'Dashamoola (compound formula)',\n'त्रिफला': 'Terminalia chebula + Emblica officinalis + Terminalia bellirica',\n'त्रिकटु': 'Trikatu (compound formula)',\n'च्यवनप्राश': 'Chyawanprash (compound formula)',\n'उड़द': 'Vigna mungo',\n'बिल्व': 'Aegle marmelos',\n'मुस्तक': 'Cyperus rotundus',\n'चव्य': 'Piper chaba',\n'सारिवा': 'Hemidesmus indicus',\n'नीलोत्पल': 'Nymphaea stellata',\n'कौंचबीज': 'Mucuna pruriens',\n'लवंग': 'Syzygium aromaticum',\n'तगर': 'Valeriana wallichii',\n'विदारीकन्द': 'Pueraria tuberosa',\n'धनिया': 'Coriandrum sativum',\n'सोंठ': 'Zingiber officinale',\n'कुमारी': 'Aloe vera',\n'हींग': 'Ferula assa-foetida',\n'कौंच': 'Mucuna pruriens',\n'यव': 'Hordeum vulgare',\n'नागवला': 'Lannea coromandelica',\n'बिल्वमूल': 'Aegle marmelos',\n'कमलगट्टा': 'Nelumbo nucifera',\n'तेजपात': 'Cinnamomum tamala',\n'नागकेसर': 'Mesua ferrea',\n'जायफल': 'Myristica fragrans',\n'काकजिह्वा': 'Heliotropium indicum',\n'अपामर्ग': 'Achyranthes aspera',\n'चन्दन': 'Santalum album',\n'यवासा': 'Adhatoda vasica',\n'मधु': 'Honey (non-plant)',\n'सितोपल': 'Saccharum officinarum (rock sugar)',\n'गोमूत्र': 'Cow urine (animal product)',\n'घृत': 'Ghee (animal product)',\n'लवण': 'Salt (mineral)',\n'यवक्षार': 'Alkali preparation (mineral)',\n'कम्बलिका': 'Piper chaba',\n'कम्बालिका': 'Piper chaba',\n'कम्पालिका': 'Piper chaba',\n'श्रीवेतसा': 'Pinus roxburghii',\n'दरुहरिद्रा': 'Berberis aristata',\n'कर्कटशृङ्गी': 'Calotropis gigantea',\n'कर्काटशृङ्गी': 'Calotropis gigantea',\n'इन्द्रयाव': 'Holarrhena antidysenterica',\n'कुटकी': 'Picrorhiza kurroa',\n'कटुकी': 'Picrorhiza kurroa',\n'भृङ्गराज': 'Eclipta alba',\n'मधुयष्टि': 'Glycyrrhiza glabra',\n'सैंधव': 'Sodium chloride',\n'मयूरघृत': 'Ghee (Mayraghta)',\n'उपोदिका': 'Commiphora wightii',\n'भूर्णा': 'Nardostachys jatamansi',\n'सुवर्चिका': 'Sodium chloride',\n'पार्श्व': 'Piper chaba',\n'पिण्डकः': 'Randia dumetorum',\n'पिण्डमुस्तः': 'Cyperus rotundus',\n'पिण्डीतगरकम्': 'Valeriana wallichii',\n'पिण्डीप्ष्प': 'Saraca asoca',\n'पुंनाग': 'Mesua ferrea',\n'पुष्करमूल': 'Inula racemosa',\n'प्रियश्न': 'Calophyllum inophyllum',\n'बीजपूर': 'Elettaria cardamomum',\n'बेतस': 'Pandanus odorifer',\n'मण्डूकपणी': 'Hydrocotyle asiatica',\n'मण्डूकपर्णी': 'Centella asiatica',\n'मलती': 'Hibiscus rosa-sinensis',\n'मसूरिका': 'Lens culinaris',\n'मांसी': 'Nardostachys jatamansi',\n'माषपर्णा': 'Crotalaria juncea',\n'मेथिका': 'Trigonella foenum-graecum',\n'यवानी': 'Trachyspermum ammi',\n'रक्तकः': 'Caesalpinia sappan',\n'रखाञ्जन': 'Mimosa pudica',\n'रजनी': 'Cestrum nocturnum',\n'वृश्चिकाली': 'Bauhinia vahlii',\n'व्योष': 'Piper longum / Piper nigrum / Zingiber officinale',\n'शतपुष्पा': 'Asparagus racemosus',\n'शफरी': 'Sida rhombifolia',\n'श्वेतचिद्री': 'Clerodendrum serratum',\n'सिरिस': 'Albizia lebbeck',\n'आम्रः': 'Mangifera indica',\n'इन्द्रयवः': 'Pueraria tuberosa',\n'कटुका': 'Picrorhiza kurroa',\n'कण्टकारी': 'Physalis minima',\n'कपित्थ': 'Ficus auriculata',\n'कमारः': 'Cucurbita maxima',\n'कर्पासी': 'Gossypium herbaceum',\n'कलायः': 'Phaseolus vulgaris',\n'काकोली': 'Hibiscus sabdariffa',\n'कुश': 'Desmostachya bipinnata',\n'क्रिमिशत्रु': 'Phytolacca acinosa',\n'क्षीरिणी': 'Euphorbia hirta',\n'गवाक्षी': 'Trichosanthes cucumerina',\n'गोधूम': 'Triticum aestivum',\n'गोभूत्रं': 'Ferula asafoetida',\n'चांगेरी': 'Capparis spinosa',\n'जयवान': 'Syzygium cumini',\n'जीवंती': 'Solanum surattense',\n'जुणा': 'Ziziphus jujuba',\n'तगरम्': 'Callicarpa macrophylla',\n'तालीश': 'Abies webbiana',\n'तिलः': 'Sesamum indicum',\n'दार्वी': 'Zanthoxylum alatum',\n'निदिग्धिका': 'Solanum indicum',\n'पाटली': 'Stereospermum chelonoides',\n'पार्श्व': 'Piper chaba',\n'पिण्डकः': 'Randia dumetorum',\n'पिण्डमुस्तः': 'Cyperus rotundus',\n'पिण्डीतगरकम्': 'Valeriana wallichii',\n'पिण्डीप्ष्प': 'Saraca asoca',\n'पुंनाग': 'Mesua ferrea',\n'पुष्करमूल': 'Inula racemosa',\n'प्रियश्न': 'Calophyllum inophyllum',\n'बीजपूर': 'Elettaria cardamomum',\n'बेतस': 'Pandanus odorifer',\n'मण्डूकपणी': 'Hydrocotyle asiatica',\n'मण्डूकपर्णी': 'Centella asiatica',\n'मलती': 'Hibiscus rosa-sinensis',\n'मसूरिका': 'Lens culinaris',\n'मांसी': 'Nardostachys jatamansi',\n'माषपर्णा': 'Crotalaria juncea',\n'मेथिका': 'Trigonella foenum-graecum',\n'यवानी': 'Trachyspermum ammi',\n'रक्तकः': 'Caesalpinia sappan',\n'रखाञ्जन': 'Mimosa pudica',\n'रजनी': 'Cestrum nocturnum',\n'वृश्चिकाली': 'Bauhinia vahlii',\n'व्योष': 'Piper longum / Piper nigrum / Zingiber officinale',\n'शतपुष्पा': 'Asparagus racemosus',\n'शफरी': 'Sida rhombifolia',\n'श्वेतचिद्री': 'Clerodendrum serratum',\n'सिरिस': 'Albizia lebbeck',\n'यष्टिमधु': 'Glycyrrhiza glabra',\n'मधुयष्टी': 'Glycyrrhiza glabra',\n'मधूलिका': 'Glycyrrhiza glabra',\n'एरण्ड': 'Ricinus communis',\n'बला': 'Sida cordifolia',\n'ब्राह्मी': 'Bacopa monnieri',\n'मंडूकपर्णी': 'Centella asiatica',\n'गोक्षुर': 'Tribulus terrestris',\n'ज्योतिष्मती': 'Celastrus paniculatus',\n'नीलिका': 'Indigofera tinctoria',\n'नीलिनी': 'Indigofera tinctoria',\n'नीली': 'Indigofera tinctoria',\n'रोहिणी': 'Picorrhiza kurroa',\n'दाडिम': 'Punica granatum',\n'सारिवा': 'Hemidesmus indicus',\n'शारिवा': 'Hemidesmus indicus',\n'चन्दन': 'Santalum album',\n'मधूक': 'Madhuca longifolia',\n'मधुक': 'Madhuca longifolia',\n'क्षीरवृक्ष': 'Ficus benghalensis',\n'खदिर': 'Acacia catechu',\n'खदिरः': 'Acacia catechu',\n'दन्ती': 'Baliospermum montanum',\n'नागदन्ती': 'Baliospermum montanum',\n'हिंग': 'Ferula assa-foetida',\n'हिङ्गु': 'Ferula assa-foetida',\n'जीरक': 'Cuminum cyminum',\n'जीरा': 'Cuminum cyminum',\n'तालीस': 'Abies webbiana',\n'द्राक्षा': 'Vitis vinifera',\n'आरग्वध': 'Cassia fistula',\n'आरग्वधः': 'Cassia fistula',\n'कर्कटशृङ्गी': 'Pistacia integerrima',\n'नागकेशर': 'Mesua ferrea',\n'नागरमोथा': 'Cyperus scariosus',\n'पुष्कर': 'Inula racemosa',\n'प्रवाल': 'Coral/Praval Pishti',\n'प्रियंगु': 'Callicarpa macrophylla',\n'वचा': 'Acorus calamus',\n'सारस्वती': 'Bacopa monnieri',\n'घृत': 'Ghee (non-plant)',\n'गोमूत्र': 'Gomutra (non-plant)',\n'यवक्षार': 'Yavakshara (non-plant)',\n'मनःशिला': 'Manahshila (mineral)',\n'हरिताल': 'Haritala (mineral)',\n'त्रिफला': 'Triphala (formula)',\n'त्रिकटु': 'Trikatu (formula)',\n'दशमूल': 'Dashamula (formula)',\n'केशर': 'Crocus sativus',\n'शिलाजतु': 'Asphaltum punjabianum',\n'गुग्गुल': 'Commiphora mukul',\n'अग्निमन्थ': 'Premna integrifolia',\n'अग्निमन्थः': 'Premna integrifolia',\n'नीलोत्पल': 'Nymphaea stellata',\n'परूषक': 'Grewia asiatica',\n'अजगन्धा': 'Carum roxburghianum',\n'अजमोदा': 'Apium graveolens',\n'अश्वक्षुरकः': 'Aesculus hippocastanum',\n'आम्रः': 'Mangifera indica',\n'इन्द्रयवः': 'Pueraria tuberosa',\n'कटुका': 'Picrorhiza kurroa',\n'कण्टकारी': 'Physalis minima',\n'कपित्थ': 'Ficus auriculata',\n'कमारः': 'Cucurbita maxima',\n'कर्पासी': 'Gossypium herbaceum',\n'कलायः': 'Phaseolus vulgaris',\n'काकोली': 'Hibiscus sabdariffa',\n'कुश': 'Desmostachya bipinnata',\n'क्रिमिशत्रु': 'Phytolacca acinosa',\n'क्षीरिणी': 'Euphorbia hirta',\n'गवाक्षी': 'Trichosanthes cucumerina',\n'गोधूम': 'Triticum aestivum',\n'गोभूत्रं': 'Ferula asafoetida',\n'चांगेरी': 'Capparis spinosa',\n'जयवान': 'Syzygium cumini',\n'जीवंती': 'Solanum surattense',\n'जुणा': 'Ziziphus jujuba',\n'तगरम्': 'Callicarpa macrophylla',\n'तालीश': 'Abies webbiana',\n'तिलः': 'Sesamum indicum',\n'दार्वी': 'Zanthoxylum alatum',\n'देवदारु': 'Cedrus deodara',\n'निदिग्धिका': 'Solanum indicum',\n'पाटली': 'Stereospermum chelonoides',\n'पार्श्व': 'Piper chaba',\n'पिण्डकः': 'Randia dumetorum',\n'पिण्डमुस्तः': 'Cyperus rotundus',\n'पिण्डीतगरकम्': 'Valeriana wallichii',\n'पिण्डीप्ष्प': 'Saraca asoca',\n'पुंनाग': 'Mesua ferrea',\n'पुष्करमूल': 'Inula racemosa',\n'प्रियश्न': 'Calophyllum inophyllum',\n'बीजपूर': 'Elettaria cardamomum',\n'बेतस': 'Pandanus odorifer',\n'मण्डूकपणी': 'Hydrocotyle asiatica',\n'मण्डूकपर्णी': 'Centella asiatica',\n'मलती': 'Hibiscus rosa-sinensis',\n'मसूरिका': 'Lens culinaris',\n'मांसी': 'Nardostachys jatamansi',\n'माषपर्णा': 'Crotalaria juncea',\n'मेथिका': 'Trigonella foenum-graecum',\n'यवानी': 'Trachyspermum ammi',\n'रक्तकः': 'Caesalpinia sappan',\n'रखाञ्जन': 'Mimosa pudica',\n'रजनी': 'Cestrum nocturnum',\n'वृश्चिकाली': 'Bauhinia vahlii',\n'व्योष': 'Piper longum / Piper nigrum / Zingiber officinale',\n'शतपुष्पा': 'Asparagus racemosus',\n'शफरी': 'Sida rhombifolia',\n'श्वेतचिद्री': 'Clerodendrum serratum',\n'सिरिस': 'Albizia lebbeck',\n'देवदारु': 'Cedrus deodara',\n'दारुहरिद्रा': 'Berberis aristata',\n'चित्रक': 'Plumbago zeylanica',\n'हरीतकी': 'Terminalia chebula',\n\n// ── MISSING TRANSLATIONS (Add These Now) ────────────────────────────────────\n'सर्ज': 'Commiphora wightii',        // Guggulu variant, resin\n'वत्सक': 'Cassia fistula',           // Aragvadha (same as आरग्वध)\n'वचा': 'Acorus calamus',             // Vacha\n'आरग्वध': 'Cassia fistula',          // Aragvadha\n'निर्गण्डी': 'Vitex negundo',         // Nirgundi\n'विडङ्ग': 'Embelia ribes',           // Vidanga\n'अर्क': 'Calotropis gigantea',       // Arka (Calotropis)\n'सुरसा': 'Ocimum tenuiflorum',       // Surasa (Tulsi variant)\n'असन': 'Pterocarpus marsupium',      // Asana (Indian Kino)\n'मुष्कक': 'Cyperus rotundus',        // Muskaka (Musta variant)\n\n// ── Additional High-Frequency Orphans (From DB Dump) ────────────────────────\n'कम्बलिका': 'Piper chaba',           // Kambalika (Lavanga proxy)\n'श्रीवेतसा': 'Pinus roxburghii',     // Shrivetasa\n'कर्कटशृङ्गी': 'Calotropis gigantea', // Karkatashringi\n'इन्द्रयाव': 'Holarrhena antidysenterica', // Indrayava\n'कुटकी': 'Picrorhiza kurroa',       // Kutki (Katuka OCR variant)\n'कटुकी': 'Picrorhiza kurroa',       // Katuki\n'भृङ्गराज': 'Eclipta alba',          // Bhringraj (hair/skin)\n'मधुयष्टि': 'Glycyrrhiza glabra',   // Madhuyashti (Yashti-madhu)\n'सैंधव': 'Sodium chloride',          // Saindhava (rock salt)\n'मधु': 'Honey',                      // Madhu (non-plant)\n'गोमूत्र': 'Gomutra',                // Cow urine (non-plant)\n\n// ── English/Romanized ────────────────────────────────────────────────────────\n'Haritaki': 'Terminalia chebula',\n'Pippali': 'Piper longum',\n'Pippall': 'Piper longum',\n'Shatavari': 'Asparagus racemosus',\n'Satavari': 'Asparagus racemosus',\n'Guduchi': 'Tinospora cordifolia',\n'Giloy': 'Tinospora cordifolia',\n'Amalaki': 'Phyllanthus emblica',\n'Amalaka': 'Phyllanthus emblica',\n'Amla': 'Phyllanthus emblica',\n'Neem': 'Azadirachta indica',\n'Nimba': 'Azadirachta indica',\n'Haridra': 'Curcuma longa',\n'Turmeric': 'Curcuma longa',\n'Turmeric (Haridra)': 'Curcuma longa',\n'Kurkuma': 'Curcuma longa',\n'Rajani': 'Curcuma longa',\n'Ashwagandha': 'Withania somnifera',\n'Vidari': 'Pueraria tuberosa',\n'Vidarika': 'Pueraria tuberosa',\n'Vidarl': 'Pueraria tuberosa',\n'Vidārī': 'Pueraria tuberosa',\n'Vidarikanda': 'Pueraria tuberosa',\n'Kantakari': 'Solanum xanthocarpum',\n'Kantakarl': 'Solanum xanthocarpum',\n'Kateri': 'Solanum xanthocarpum',\n'Bala': 'Sida cordifolia',\n'Atibala': 'Abutilon indicum',\n'Mahabala': 'Sida rhombifolia',\n'Tulsi': 'Ocimum tenuiflorum',\n'Tulasi': 'Ocimum tenuiflorum',\n'Sunth': 'Zingiber officinale',\n'Sunthi': 'Zingiber officinale',\n'Shunthi': 'Zingiber officinale',\n\"S'unthi\": 'Zingiber officinale',\n'Ginger': 'Zingiber officinale',\n'Nagara': 'Zingiber officinale',\n'Maricha': 'Piper nigrum',\n'Marica': 'Piper nigrum',\n'Marisa': 'Piper nigrum',\n'Vasa': 'Adhatoda vasica',\n'Vasaka': 'Adhatoda vasica',\n'Vrsa': 'Adhatoda vasica',\n'Vasā': 'Adhatoda vasica',\n'Arusa': 'Adhatoda vasica',\n'Arjuna': 'Terminalia arjuna',\n'Bakuchi': 'Psoralea corylifolia',\n'Kushta': 'Saussurea lappa',\n'Kushtha': 'Saussurea costus',\n'Kustha': 'Saussurea costus',\n'Manjistha': 'Rubia cordifolia',\n'Manjishtha': 'Rubia cordifolia',\n'Musta': 'Cyperus rotundus',\n'Ela': 'Elettaria cardamomum',\n'Elā': 'Elettaria cardamomum',\n'Cardamom': 'Elettaria cardamomum',\n'Sthulaila': 'Amomum subulatum',\n'Kakanasa': 'Solanum xanthocarpum',\n'Kakamachi': 'Solanum nigrum',\n'Kakamaci': 'Solanum nigrum',\n'Punarnava': 'Boerhavia diffusa',\n'Bhringraj': 'Eclipta prostrata',\n'Chitraka': 'Plumbago zeylanica',\n'Citraka': 'Plumbago zeylanica',\n'Rakta Citraka': 'Plumbago rosea',\n'Raktachitraka': 'Plumbago rosea',\n'Kutaj': 'Holarrhena antidysenterica',\n'Kutaja': 'Holarrhena antidysenterica',\n'Kutki': 'Picorrhiza kurroa',\n'Katuka': 'Picrorhiza kurroa',\n'KatukI': 'Picorrhiza kurroa',\n'Katuki': 'Picrorhiza kurroa',\n'Haimavati': 'Picrorhiza kurroa',\n'Katu-rohini': 'Picrorhiza kurroa',\n'Kiratatikta': 'Swertia chirata',\n'Kirata-tikta': 'Swertia chirata',\n'Bhunimba': 'Swertia chirata',\n'Chirayata': 'Swertia chirata',\n'Kalmegh': 'Andrographis paniculata',\n'Varuna': 'Crataeva nurvala',\n'Varun': 'Crataeva nurvala',\n'Ashoka': 'Saraca asoca',\n'Lodhra': 'Symplocos racemosa',\n'Ushira': 'Vetiveria zizanioides',\n'Usira': 'Vetiveria zizanioides',\n'Uslra': 'Vetiveria zizanioides',\n'Patha': 'Cissampelos pareira',\n'Vidanga': 'Embelia ribes',\n'Yashtimadhu': 'Glycyrrhiza glabra',\n'Yastimadhu': 'Glycyrrhiza glabra',\n'Yashti-madhu': 'Glycyrrhiza glabra',\n'Madhuyashti': 'Glycyrrhiza glabra',\n'Licorice': 'Glycyrrhiza glabra',\n'Madhuka': 'Madhuca longifolia',\n'Brahmi': 'Bacopa monnieri',\n'Mandukaparni': 'Centella asiatica',\n'Shankhapushpi': 'Convolvulus pluricaulis',\n'Shankhpushpi': 'Convolvulus pluricaulis',\n'Gokshura': 'Tribulus terrestris',\n'Shilajatu': 'Asphaltum punjabianum',\n'Shilajit': 'Asphaltum punjabianum',\n'Silajatu': 'Asphaltum punjabianum',\n'Silajit': 'Asphaltum punjabianum',\n'Guggulu': 'Commiphora mukul',\n'Guggulu (Commiphora mukul)': 'Commiphora mukul',\n'Devadaru': 'Cedrus deodara',\n'Devaddru': 'Cedrus deodara',\n'Deva-ddru': 'Cedrus deodara',\n'Bhadradaru/Devadaru': 'Cedrus deodara',\n'Sura-daru': 'Cedrus deodara',\n'Daruharidra': 'Berberis aristata',\n'Rasna': 'Pluchea lanceolata',\n'Bilva': 'Aegle marmelos',\n'Triphala': 'Terminalia chebula + Emblica officinalis + Terminalia bellirica',\n'Dashamoola': 'Dashamoola (compound formula)',\n'Trikatu': 'Trikatu (compound formula)',\n'Tri-katu': 'Trikatu (compound formula)',\n'Chyawanprash': 'Chyawanprash (compound formula)',\n'Pathyadi Shadanga Kwatha': 'Pathyadi Shadanga Kwatha (compound formula)',\n'Amritadi Kwatha': 'Amritadi Kwatha (compound formula)',\n'Hingvadi-Vati': 'Hingvadi-Vati (compound formula)',\n'Sitopala': 'Saccharum officinarum (rock sugar)',\n'Vacha': 'Acorus calamus',\n'Shirisha': 'Albizia lebbeck',\n\"S'irisha\": 'Albizia lebbeck',\n'Murva': 'Marsdenia tenacissima',\n'Ativisha': 'Aconitum heterophyllum',\n'Bhargi': 'Clerodendrum serratum',\n'Sariva': 'Hemidesmus indicus',\n'Sariba': 'Hemidesmus indicus',\n'Draksha': 'Vitis vinifera',\n'Utpala': 'Nymphaea stellata',\n'Chandana': 'Santalum album',\n'Padmaka': 'Prunus cerasoides',\n'Sindhuvara': 'Vitex negundo',\n'Black Sindhuvdra': 'Vitex negundo',\n'Nirgundi': 'Vitex negundo',\n'Kapittha': 'Feronia limonia',\n'Tagara': 'Valeriana wallichii',\n'Jivanti': 'Leptadenia reticulata',\n'Dadaru': 'Eclipta alba',\n'Dadrumuti': 'Eclipta alba',\n'Hastipippali': 'Piper longum',\n'Bhagi': 'Sida cordifolia',\n'Karavira': 'Nerium indicum',\n'Choraka': 'Angelica glauca',\n'Hingu': 'Ferula assa-foetida',\n'Karpura': 'Cinnamomum camphora',\n'Madana': 'Randia dumetorum',\n'Danti': 'Baliospermum montanum',\n'Trivrit': 'Operculina turpethum',\n'Kalasaka': 'Momordica charantia',\n'Shurati': 'Solanum surattense',\n'Tumburu': 'Zanthoxylum armatum',\n'Vetra': 'Calamus rotang',\n'Sarshapa': 'Brassica juncea',\n'Kala Jira': 'Carum carvi',\n'Jiraka': 'Cuminum cyminum',\n'Kumari': 'Aloe vera',\n'Kashmarya': 'Gmelina arborea',\n'Paripelava': 'Ficus infectoria',\n'Mdmsi': 'Nardostachys jatamansi',\n'Dhydmaka': 'Cyperus rotundus',\n'Antkotha': 'Saussurea costus',\n'Rasanjana': 'Berberis aristata',\n'Rasahjana': 'Berberis aristata',\n'Dhanyamla': 'Dhanyamla',\n'Karanjadya Ghrita': 'Ghee (animal product)',\n'Honey': 'Honey (non-plant)',\n'ginger': 'Zingiber officinale',\n'Jatamansi': 'Nardostachys jatamansi',\n'White mustard seed': 'Sinapis alba',\n'Saindhava': 'Rock salt',\n'Pippalyadi group': 'Pippalyadi group drugs',\n'Ushakaddi group drugs': 'Ushakaddi group drugs',\n'Varunadi group drugs': 'Crataeva nurvala',\n'Tila-kailaka': 'Tila-kailaka (compound formula)',\n'Tilakailaka': 'Tila-kailaka (compound formula)',\n'Kambalika': 'Piper chaba',\n'Kambalika': 'Piper chaba',\n'Kambalika': 'Piper chaba',\n'Srivestaka': 'Pinus roxburghii',\n'Karkata-shringi': 'Calotropis gigantea',\n'Karkata-shringi': 'Calotropis gigantea',\n'Indrayava': 'Holarrhena antidysenterica',\n'Katuki': 'Picrorhiza kurroa',\n'Bhringraj': 'Eclipta alba',\n'Madhuyashti': 'Glycyrrhiza glabra',\n'Saindhava': 'Sodium chloride',\n'Madhu': 'Honey',\n'Gomutra': 'Cow urine',\n'Ghee': 'Ghee (non-plant)',\n'Gomutra': 'Gomutra (non-plant)',\n'Yavakshara': 'Yavakshara (mineral)',\n'Manahshila': 'Manahshila (mineral)',\n'Haritala': 'Haritala (mineral)',\n'Triphala': 'Triphala (formula)',\n'Trikatu': 'Trikatu (formula)',\n'Dashamula': 'Dashamula (formula)',\n'Kesar': 'Crocus sativus',\n'Aloe Vera': 'Aloe vera',\n'Bitter Melon': 'Momordica charantia',\n'Karela': 'Momordica charantia',\n'Karavella': 'Momordica charantia',\n'Nagakesara': 'Mesua ferrea',\n'Shallaki': 'Boswellia serrata',\n'Shallaki (Boswellia serrata)': 'Boswellia serrata',\n'Kapikacchu': 'Mucuna pruriens',\n'Kapikachhu': 'Mucuna pruriens',\n'Kapikachchu': 'Mucuna pruriens',\n'Indravaruṇī': 'Citrullus colocynthis',\n'Indrayava': 'Holarrhena antidysenterica',\n'Palasha': 'Butea monosperma',\n'Shirisha': 'Albizzia lebbeck',\n'Shyonaka': 'Oroxylum indicum',\n'Rohitaka': 'Tecomella undulata',\n'Kadamba': 'Neolamarckia cadamba',\n'Agnimantha': 'Premna integrifolia',\n'Parpata': 'Fumaria officinalis',\n'Trayanti': 'Gentiana kurroo',\n'Girikarni': 'Clitoria ternatea',\n'Babbula': 'Acacia arabica',\n'Babula': 'Acacia arabica',\n'Udumbara': 'Ficus racemosa',\n'Shami': 'Prosopis cineraria',\n'Honey': 'Honey (non-plant)',\n'Ghee': 'Ghee (non-plant)',\n'Gomutra': 'Gomutra (non-plant)',\n'Surasa': 'Ocimum tenuiflorum',\n'Pravala': 'Coral/Praval',\n'Pitaka': 'Cyperus rotundus',\n'Yavakshara': 'Yavakshara (mineral)',\n'Svedakarma': 'Svedakarma (procedure)',\n'Snehakarma': 'Snehakarma (procedure)',\n'Abhaya': 'Terminalia chebula',\n'Amra': 'Spondias mombin',\n'Amra Haridra': 'Curcuma longa',\n'Ankol': 'Alangium salviifolium',\n'Aranya-surana': 'Dioscorea species',\n'Ararota': 'Maranta arundinacea',\n'Arka': 'Calotropis procera',\n'Asana': 'Pterocarpus marsupium',\n'Asitajiraka': 'Nigella sativa',\n'Atis': 'Arisaema species',\n'Ativisa': 'Aconitum heterophyllum',\n'Bhringaraja': 'Eclipta alba',\n'Bimbi': 'Coccinia indica',\n'Bonduc Nut': 'Guilandina bonduc',\n'Chironji': 'Buchanania latifolia',\n'Cinnamomum': 'Cinnamomum verum',\n'Conessi bark': 'Ailanthus excelsa',\n'Curry leaf': 'Murraya koenigii',\n'Danti': 'Baliospermum montanum',\n'Darvytvak': 'Cinnamomum tamala',\n'Devadali': 'Luffa echinata',\n'Dhanvayasa': 'Zygophyllum fabago',\n'Dhatura': 'Datura stramonium',\n'Dhava': 'Anogeissus latifolia',\n'Dhustura': 'Datura metel',\n'Dhātakī': 'Woodfordia fruticosa',\n'Abhaya': 'Terminalia chebula',\n'Ajajika': 'Cuminum cyminum',\n'Amra': 'Spondias mombin',\n'Amra Haridra': 'Curcuma longa',\n'Ankol': 'Alangium salviifolium',\n'Aranya-surana': 'Dioscorea species',\n'Ararota': 'Maranta arundinacea',\n'Arka': 'Calotropis procera',\n'Asana': 'Pterocarpus marsupium',\n'Asitajiraka': 'Nigella sativa',\n'Atis': 'Arisaema species',\n'Ativisa': 'Aconitum heterophyllum',\n'Bhringaraja': 'Eclipta alba',\n'Bimbi': 'Coccinia indica',\n'Bonduc Nut': 'Guilandina bonduc',\n'Chironji': 'Buchanania latifolia',\n'Cinnamomum': 'Cinnamomum verum',\n'Conessi bark': 'Ailanthus excelsa',\n'Curry leaf': 'Murraya koenigii',\n'Danti': 'Baliospermum montanum',\n'Darvytvak': 'Cinnamomum tamala',\n'Devadali': 'Luffa echinata',\n'Dhanvayasa': 'Zygophyllum fabago',\n'Dhatura': 'Datura stramonium',\n'Dhava': 'Anogeissus latifolia',\n'Dhustura': 'Datura metel',\n'Dhātakī': 'Woodfordia fruticosa',\n};\n\n// ── STEP 5: NON-PLANT SUBSTANCE REGISTRY ────────────────────────────────────\nconst NON_PLANT_REGISTRY = {\n// ── ANIMAL PRODUCTS ──────────────────────────────────────────────────────────\nanimal_product: [\n'madhu', 'मधु', 'honey',\n'ghrita', 'ghee', 'घृत', 'sarpi',\n'kshira', 'milk', 'dugdha', 'क्षीर',\n'dadhi', 'curd', 'yogurt', 'दधि',\n'takra', 'buttermilk', 'तक्र',\n'navanita', 'butter', 'नवनीत',\n'ajaksheera', 'goat milk',\n'gavyaghrita', 'cow ghee',\n'gomutra', 'cow urine', 'गोमूत्र',\n'gomaya', 'cow dung', 'गोमय',\n'mutra', 'urine',\n'pita', 'bile',\n'ahiphena', 'opium',\n'mamsarasa', 'meat broth',\n'mamsa', 'meat', 'मांस',\n'vasa', 'animal fat',\n'majja', 'bone marrow', 'मज्जा',\n'asthi', 'bone',\n'shukra', 'semen',\n'rakta', 'blood', 'रक्त',\n'pitta', 'bile of animal',\n'charma', 'hide/skin',\n'nakha', 'nails/claws',\n'valmika', 'anthill soil'\n],\n// ── MINERALS & METALS ────────────────────────────────────────────────────────\nmineral: [\n'lavana', 'salt', 'लवण',\n'saindhava', 'rock salt', 'सैंधव',\n'vida lavana', 'vidha lavana', 'vida salt',\n'sauvarchala', 'black salt', 'सौवर्चल',\n'samudra lavana', 'sea salt',\n'audbhida lavana', 'audbhid lavana',\n'yavakshara', 'barley alkali', 'यवक्षार',\n'svarjikakshara', 'natron',\n'tankana', 'borax', 'टंकण',\n'sajji kshara', 'sajjikshara',\n'swarna', 'gold', 'स्वर्ण',\n'rajata', 'silver', 'रजत',\n'tamra', 'copper', 'ताम्र',\n'loha', 'iron', 'लोह',\n'mandura', 'iron calx', 'मंडूर',\n'vanga', 'tin', 'वंग',\n'naga', 'lead', 'नाग',\n'yashada', 'zinc', 'यशद',\n'kamsya', 'bronze',\n'pittala', 'brass',\n'gairika', 'red ochre', 'गैरिक',\n'suvarna gairika', 'red ochre with gold',\n'hingula', 'cinnabar', 'हिंगुल',\n'manahshila', 'realgar', 'arsenic sulfide', 'मनःशिला',\n'haritala', 'orpiment', 'हरिताल',\n'kasisa', 'ferrous sulphate', 'कासीस',\n'tuttha', 'copper sulphate', 'तूथ',\n'sphatika', 'alum', 'स्फटिक',\n'mukta', 'pearl', 'मुक्ता',\n'pravala', 'coral', 'प्रवाल',\n'shankha', 'conch shell', 'शंख',\n'godanti', 'gypsum',\n'vajra', 'diamond',\n'vaikranta', 'topaz',\n'sasyaka', 'chalcopyrite',\n'abhraka', 'mica', 'अभ्रक',\n'makshika', 'pyrite', 'माक्षिक'\n],\n// ── MINERAL PROCESSED ────────────────────────────────────────────────────────\nmineral_processed: [\n'sitopala', 'सितोपल', 'rock sugar', 'mishri', 'sugar candy',\n'sharkara', 'sugar', 'शर्करा',\n'khandsari', 'raw sugar',\n'yavagu', 'rice gruel',\n'sura', 'fermented liquor',\n'arishta', 'medicated wine',\n'asava', 'fermented decoction',\n'bhasma', 'calcined ash',\n'pishti', 'gem preparation',\n'sindura', 'red lead',\n'suvarchika', 'sodium chloride variant'\n],\n// ── COMPOUND FORMULAS ────────────────────────────────────────────────────────\ncompound_formula: [\n'triphala', 'त्रिफला', 'tri phala',\n'trikatu', 'त्रिकटु', 'tri katu', 'tri-katu',\n'tridosha', 'त्रिदोष',\n'dashamoola', 'दशमूल', 'dashmoola', 'dasamoola',\n'chyawanprash', 'च्यवनप्राश', 'chyavanprash',\n'triphala guggulu',\n'yogaraj guggulu',\n'kaishore guggulu',\n'mahayogaraj guggulu',\n'chandraprabha vati',\n'arogyavardhini vati',\n'pathyadi shadanga kwatha', 'pathyadi kwatha',\n'amritadi kwatha',\n'hingvadi vati', 'hingvadi-vati',\n'sitopaladi churna',\n'talisadi churna',\n'mahasudarshan churna',\n'avipattikar churna',\n'hingashtak churna',\n'panchakola', 'पञ्चकोल',\n'panchatikta',\n'panchamula',\n'shadanga kwatha',\n'sarivadyasava',\n'dashamularishta',\n'ashwagandharishta',\n'draksharishta',\n'kumaryasava',\n'lohasava',\n'pippalyasava',\n'brihat vata chintamani',\n'sarpagandha vati',\n'brahmi vati',\n'tila-kailaka', 'tilakailaka'\n],\n// ── GUM & RESIN ──────────────────────────────────────────────────────────────\ngum_resin: [\n'guggulu', 'गुग्गुलु', 'commiphora',\n'shallaki resin', 'boswellia resin',\n'hingu resin',\n'sarjarasa', 'sal resin',\n'ral', 'dammar resin',\n'lakh', 'lac', 'laksha', 'लाक्षा',\n'hingu', 'ferula resin'\n],\n// ── OIL PREPARATIONS ────────────────────────────────────────────────────────\noil_preparation: [\n'kshira taila', 'milk oil',\n'gandha taila', 'fragrant oil',\n'tila taila', 'sesame oil preparation',\n'sarshapa taila', 'mustard oil preparation',\n'narayana taila',\n'dhanvantari taila',\n'mahanarayan taila',\n'mahavishgarbha taila',\n'ksheerbala taila',\n'pinda taila',\n'jatyadi taila',\n'triphaladi taila',\n'brahmi ghrita',\n'shatavari ghrita',\n'panchatikta ghrita'\n]\n};\n\n// ── STEP 6: Flatten registry for fast lookup ──────────────────────────────────\nconst nonPlantTokenMap = {};\nfor (const [category, terms] of Object.entries(NON_PLANT_REGISTRY)) {\n  for (const term of terms) {\n    nonPlantTokenMap[term.toLowerCase().trim()] = category;\n  }\n}\n\n// ── STEP 7: INVALID HERB VALUE GUARD ─────────────────────────────────────────\nconst INVALID_HERB_VALUES = new Set([\n  '', 'null', 'unknown', 'n/a', 'none', 'undefined', '-', '—'\n]);\n\nfunction isInvalidHerb(herbName) {\n  if (herbName === null || herbName === undefined) return true;\n  return INVALID_HERB_VALUES.has(String(herbName).toLowerCase().trim());\n}\n\n// ── STEP 8: SAFER NON-PLANT DETECTION ────────────────────────────────────────\nfunction isNonPlantSubstance(herbName) {\n  if (!herbName) return false;\n  const lower = herbName.toLowerCase().trim();\n  // Exact match — always safe\n  if (nonPlantTokenMap[lower] !== undefined) return true;\n  // Forward partial: herbName contains a registered token\n  const forwardMatch = Object.keys(nonPlantTokenMap).some(token =>\n    token.length >= 5 && lower.includes(token)\n  );\n  if (forwardMatch) return true;\n  // Reverse partial: a registered token contains herbName\n  if (lower.length >= 6) {\n    return Object.keys(nonPlantTokenMap).some(token =>\n      token.includes(lower)\n    );\n  }\n  return false;\n}\n\nfunction getSubstanceType(herbName) {\n  if (!herbName) return 'plant';\n  const lower = herbName.toLowerCase().trim();\n  if (nonPlantTokenMap[lower]) return nonPlantTokenMap[lower];\n  const matchedToken = Object.keys(nonPlantTokenMap).find(token =>\n    (token.length >= 5 && lower.includes(token)) ||\n    (lower.length >= 6 && token.includes(lower))\n  );\n  return matchedToken ? nonPlantTokenMap[matchedToken] : 'plant';\n}\n\n// ── STEP 9: HELPER FUNCTIONS ─────────────────────────────────────────────────\nfunction getScientificName(herbName) {\n  if (!herbName) return '';\n  if (botanicalLookup[herbName]) return botanicalLookup[herbName];\n  const cleanName = herbName.split('(')[0].trim();\n  if (botanicalLookup[cleanName]) return botanicalLookup[cleanName];\n  const matchedKey = Object.keys(botanicalLookup).find(key =>\n    key.includes(herbName) || herbName.includes(key)\n  );\n  return matchedKey ? botanicalLookup[matchedKey] : '';\n}\n\nfunction normalizeHerbName(herbName) {\n  if (!herbName) return '';\n  const normalizationMap = {\n    \"S'unthi\": \"Shunthi\",\n    \"Devaddru\": \"Devadaru\",\n    \"Deva-ddru\": \"Devadaru\",\n    \"S'irisha\": \"Shirisha\",\n    \"Katu-rohini\": \"Katu Rohini\",\n    \"Kirata-tikta\": \"Kirata Tikta\",\n    \"Yashti-madhu\": \"Yashtimadhu\",\n    \"Manah-s'ild\": \"Manahshila\",\n    \"Dashamoola\": \"Dashamoola (compound formula)\",\n    \"Trikatu\": \"Trikatu (compound formula)\",\n    \"Tri-katu\": \"Trikatu (compound formula)\",\n    \"Chyawanprash\": \"Chyawanprash (compound formula)\",\n    \"Pathyadi Shadanga Kwatha\": \"Pathyadi Shadanga Kwatha (compound formula)\",\n    \"Amritadi Kwatha\": \"Amritadi Kwatha (compound formula)\",\n    \"Hingvadi-Vati\": \"Hingvadi-Vati (compound formula)\",\n    \"Sitopala\": \"Sitopala (rock sugar)\",\n    \"सितोपल\": \"Sitopala (rock sugar)\",\n    \"Gairika\": \"Gairika (red ochre mineral)\",\n    \"Suvarna-Gairika\": \"Suvarna-Gairika (mineral compound)\",\n    \"Kshira Taila\": \"Kshira Taila (oil preparation)\",\n    \"Gandha Taila\": \"Gandha Taila (oil preparation)\",\n    \"Tila-kailaka\": \"Tila-kailaka (compound formula)\",\n    \"Tilakailaka\": \"Tila-kailaka (compound formula)\",\n    \"Tila kailaka\": \"Tila-kailaka (compound formula)\",\n  };\n  return normalizationMap[herbName] || herbName;\n}\n\n// ── STEP 10: MAIN PROCESSING ──────────────────────────────────────────────────\nconst validResults = [];\nconst skippedResults = [];\n\nfor (const pair of filteredPairs) {\n  const herbName = pair.herb || '';\n  \n  // ── FIX 1: Skip null/unknown herbs immediately ──────────────────────────────\n  if (isInvalidHerb(herbName)) {\n    console.log(`⚠️ Skipping invalid herb: \"${herbName}\"`);\n    skippedResults.push({ json: {\n      skipped: true,\n      reason: 'invalid_herb_name',\n      debug: `herb value was: ${JSON.stringify(herbName)}`,\n      disease_sanskrit: input.primary_sanskrit || pair.disease || 'Unknown',\n      original_disease_id: input.id || null,\n      extracted_at: new Date().toISOString()\n    }});\n    continue;\n  }\n  \n  const diseaseSanskrit = input.primary_sanskrit || pair.disease || 'Unknown';\n  const diseaseEnglish = input.primary_english || pair.diseaseEnglish || 'Unknown';\n  const icdCode = input.icd || pair.icd11Code || 'TM26.00';\n  const diseaseCategory = input.category || 'General';\n  const normalizedHerbName = normalizeHerbName(herbName);\n  const cleanHerbName = normalizedHerbName.split('(')[0].trim();\n  const scientificName = getScientificName(normalizedHerbName) ||\n                         getScientificName(cleanHerbName) || '';\n  const isNonPlant = isNonPlantSubstance(normalizedHerbName) ||\n                     isNonPlantSubstance(cleanHerbName);\n  const substanceType = isNonPlant\n    ? (getSubstanceType(normalizedHerbName) || getSubstanceType(cleanHerbName) || 'unknown_non_plant')\n    : 'plant';\n  \n  let propertiesString = '';\n  if (Array.isArray(pair.properties)) {\n    propertiesString = pair.properties.join(', ');\n  } else if (typeof pair.properties === 'string') {\n    propertiesString = pair.properties;\n  }\n  \n  validResults.push({\n    json: {\n      herb: cleanHerbName,\n      herb_sanskrit: cleanHerbName,\n      herb_scientific: scientificName,\n      chunk_id: pair.chunk_id || '',\n      is_non_plant: isNonPlant,\n      substance_type: substanceType,\n      skip_reason: isNonPlant ? `non-plant: ${substanceType}` : '',\n      disease_sanskrit: diseaseSanskrit,\n      disease_english: diseaseEnglish,\n      icd11_code: icdCode,\n      disease_category: diseaseCategory,\n      confidence: pair.confidence || 0.5,\n      association: pair.association || 'indicated',\n      context: pair.context || '',\n      properties: propertiesString,\n      original_disease_id: input.id || null,\n      source: pair.source || 'TM2-150-Expanded',\n      skipped: false,\n      extracted_at: new Date().toISOString(),\n      full_data_json: JSON.stringify({\n        herb: herbName,\n        herb_sanskrit: cleanHerbName,\n        herb_scientific: scientificName,\n        disease_sanskrit: diseaseSanskrit,\n        disease_english: diseaseEnglish,\n        chunk_id: pair.chunk_id || '', \n        icd11_code: icdCode,\n        disease_category: diseaseCategory,\n        confidence: pair.confidence || 0.5,\n        association: pair.association || 'indicated',\n        context: pair.context || '',\n        properties: pair.properties || [],\n        original_disease_id: input.id || null,\n        source: pair.source || 'TM2-150-Expanded',\n        is_non_plant: isNonPlant,\n        substance_type: substanceType\n      })\n    }\n  });\n}\n\n// ── STEP 11: OUTPUT SUMMARY ──────────────────────────────────────────────────\nconsole.log(`\\n=== ARISE Agent 0 Parser Complete ===`);\nconsole.log(`Total input pairs: ${filteredPairs.length}`);\nconsole.log(`Valid items returned: ${validResults.length}`);\nconsole.log(`Skipped items filtered: ${skippedResults.length}`);\nconsole.log(`Non-plant substances: ${validResults.filter(r => r.json.is_non_plant).length}`);\n\nif (skippedResults.length > 0) {\n  console.log(`\\n⚠️ Skipped items (not returned to downstream):`);\n  skippedResults.forEach((item, idx) => {\n    console.log(`  ${idx + 1}. ${item.json.reason}: ${item.json.debug}`);\n  });\n}\n\nif (validResults.length > 0) {\n  const firstValid = validResults.find(r => !r.json.skipped);\n  if (firstValid) {\n    console.log(`\\n✓ Sample valid output:`);\n    console.log(JSON.stringify(firstValid.json, null, 2));\n  }\n}\n\n// ── STEP 12: RETURN ONLY VALID ITEMS ─────────────────────────────────────────\n// CRITICAL FIX: Don't return skipped items to downstream nodes\nreturn validResults;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        3936
+      ],
+      "id": "a31cf5a0-194c-43bb-be1e-847dc9055797",
+      "name": "Parse and Filter"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash-lite",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        112,
+        4048
+      ],
+      "id": "a5061c46-7710-4009-a0e0-9a2b45b960ba",
+      "name": "Google Gemini Chat Model",
+      "retryOnFail": true,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "REPLACE",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        896,
+        3936
+      ],
+      "id": "8a689394-0704-4317-9393-55013b251ec8",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"pairs\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"herb\": { \"type\": \"string\" },\n          \"disease\": { \"type\": \"string\" },\n          \"diseaseEnglish\": { \"type\": \"string\" },\n          \"icd11Code\": { \"type\": \"string\" },\n          \"chunk_id\": { \"type\": \"string\" },\n          \"association\": {\n            \"type\": \"string\",\n            \"enum\": [\"indicated\", \"contraindicated\", \"neutral\"]\n          },\n          \"confidence\": {\n            \"type\": \"number\",\n            \"minimum\": 0.3,\n            \"maximum\": 1.0\n          },\n          \"context\": { \"type\": \"string\" },\n          \"properties\": {\n            \"oneOf\": [\n              { \"type\": \"array\", \"items\": { \"type\": \"string\" } },\n              { \"type\": \"string\" }\n            ]\n          }\n        },\n        \"required\": [\"herb\", \"disease\", \"diseaseEnglish\", \"icd11Code\", \"association\", \"confidence\", \"chunk_id\"]\n      }\n    }\n  },\n  \"required\": [\"pairs\"]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        768,
+        4112
+      ],
+      "id": "408d16f0-4938-4121-bbc4-1cec54a2982c",
+      "name": "Structured Output Parser",
+      "retryOnFail": false,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "options": {
+          "numResults": 8,
+          "pageNumber": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolSearXng",
+      "typeVersion": 1,
+      "position": [
+        256,
+        4064
+      ],
+      "id": "d96c20e3-747f-413a-879b-4e1f0ca27230",
+      "name": "Web search Herbs",
+      "credentials": {
+        "searXngApi": {
+          "id": "iLXAIeOAjmq80QAK",
+          "name": "SearXNG account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolName": "retriever",
+        "toolDescription": "Retrieve data from a semantic database to answer questions",
+        "qdrantCollection": {
+          "__rl": true,
+          "value": "ethno4",
+          "mode": "list",
+          "cachedResultName": "ethno4"
+        },
+        "topK": 40,
+        "options": {
+          "contentPayloadKey": "text",
+          "metadataPayloadKey": "metadata"
+        }
+      },
+      "id": "02f4ba76-671b-4231-b72a-eca7917e7b58",
+      "name": "Qdrant Vector Store",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreQdrant",
+      "position": [
+        400,
+        3984
+      ],
+      "typeVersion": 1.2,
+      "credentials": {
+        "qdrantApi": {
+          "id": "q2MD0OGus6nRo0Do",
+          "name": "QdrantApi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const tm2Diseases = [{\"id\":49,\"icd\":\"TM27.00\",\"primary_sanskrit\":\"Unmada\",\"primary_english\":\"Psychosis\",\"devanagari\":\"उन्माद\",\"category\":\"Mental\",\"synonyms\":[\"Unmada\",\"Unmaad\",\"Unmad\",\"Unmada Roga\",\"उन्माद\",\"psychosis\",\"insanity\",\"mania\",\"Vataja Unmada\",\"Pittaja Unmada\",\"Kaphaja Unmada\",\"Sannipataja Unmada\",\"Bhutavishta Unmada\"]},{\"id\":50,\"icd\":\"TM27.01\",\"primary_sanskrit\":\"Apasmara Unmada\",\"primary_english\":\"Epileptic psychosis\",\"devanagari\":\"अपस्मार उन्माद\",\"category\":\"Mental\",\"synonyms\":[\"Apasmara Unmada\",\"Apasmara Unmad\",\"अपस्मार उन्माद\",\"epileptic psychosis\",\"seizure psychosis\",\"postictal psychosis\"]},{\"id\":51,\"icd\":\"TM27.02\",\"primary_sanskrit\":\"Chinta\",\"primary_english\":\"Anxiety\",\"devanagari\":\"चिन्ता\",\"category\":\"Mental\",\"synonyms\":[\"Chinta\",\"Chintaa\",\"Chinta Roga\",\"चिन्ता\",\"anxiety\",\"worry\",\"anxiety disorder\",\"Udvega\",\"Bhaya\"]},{\"id\":52,\"icd\":\"TM27.03\",\"primary_sanskrit\":\"Vishada\",\"primary_english\":\"Depression\",\"devanagari\":\"विषाद\",\"category\":\"Mental\",\"synonyms\":[\"Vishada\",\"Vishaad\",\"Vishad\",\"विषाद\",\"depression\",\"melancholia\",\"sadness\",\"Avasada\",\"Mano Avasada\",\"Dainya\"]},{\"id\":53,\"icd\":\"TM27.04\",\"primary_sanskrit\":\"Anidra\",\"primary_english\":\"Insomnia\",\"devanagari\":\"अनिद्रा\",\"category\":\"Mental\",\"synonyms\":[\"Anidra\",\"Anidraa\",\"Anidra Roga\",\"अनिद्रा\",\"insomnia\",\"sleeplessness\",\"Nidranasha\",\"Nidra Nasha\"]},{\"id\":54,\"icd\":\"TM27.10\",\"primary_sanskrit\":\"Yonivyapad\",\"primary_english\":\"Vaginal disorders\",\"devanagari\":\"योनिव्यापद\",\"category\":\"Gynecological\",\"synonyms\":[\"Yonivyapad\",\"Yoni Vyapad\",\"Yoni Vyapat\",\"Yoni Roga\",\"योनिव्यापद\",\"vaginal disorders\",\"gynecological disorders\",\"uterine disorders\",\"Vatala Yoni\",\"Pittala Yoni\",\"Sleshmala Yoni\"]},{\"id\":55,\"icd\":\"TM27.11\",\"primary_sanskrit\":\"Artava Dushti\",\"primary_english\":\"Menstrual disorders\",\"devanagari\":\"आर्तव दुष्टि\",\"category\":\"Gynecological\",\"synonyms\":[\"Artava Dushti\",\"Aartava Dushti\",\"Artava Dosha\",\"Artava Vikara\",\"Artavakshaya\",\"आर्तव दुष्टि\",\"menstrual disorders\",\"dysmenorrhea\",\"amenorrhea\",\"menorrhagia\",\"irregular menstruation\",\"Asrigdara\",\"Kashta Artava\",\"Rakta Pradara\"]},{\"id\":56,\"icd\":\"TM27.12\",\"primary_sanskrit\":\"Pradara\",\"primary_english\":\"Leucorrhea\",\"devanagari\":\"प्रदर\",\"category\":\"Gynecological\",\"synonyms\":[\"Pradara\",\"Pradar\",\"Shveta Pradara\",\"Shweta Pradar\",\"प्रदर\",\"leucorrhea\",\"leucorrhoea\",\"vaginal discharge\",\"white discharge\"]},{\"id\":57,\"icd\":\"TM27.13\",\"primary_sanskrit\":\"Vandhyatva\",\"primary_english\":\"Infertility\",\"devanagari\":\"वन्ध्यत्व\",\"category\":\"Gynecological\",\"synonyms\":[\"Vandhyatva\",\"Bandhyatva\",\"Vandhya\",\"वन्ध्यत्व\",\"infertility\",\"sterility\",\"barrenness\",\"Apraja\",\"Kakavandhya\"]},{\"id\":58,\"icd\":\"TM27.20\",\"primary_sanskrit\":\"Netra Roga\",\"primary_english\":\"Eye diseases\",\"devanagari\":\"नेत्र रोग\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Netra Roga\",\"Netraroga\",\"Netra Vikara\",\"Akshi Roga\",\"Drishti Roga\",\"नेत्र रोग\",\"eye diseases\",\"ophthalmic disorders\",\"eye disorders\"]},{\"id\":59,\"icd\":\"TM27.21\",\"primary_sanskrit\":\"Timira\",\"primary_english\":\"Cataract\",\"devanagari\":\"तिमिर\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Timira\",\"Timir\",\"Timira Roga\",\"Linganasha\",\"तिमिर\",\"cataract\",\"lens opacity\",\"visual impairment\",\"Kacha\"]},{\"id\":60,\"icd\":\"TM27.22\",\"primary_sanskrit\":\"Abhishyanda\",\"primary_english\":\"Conjunctivitis\",\"devanagari\":\"अभिष्यन्द\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Abhishyanda\",\"Abhishyand\",\"Abhishyanda Roga\",\"अभिष्यन्द\",\"conjunctivitis\",\"pink eye\",\"eye infection\",\"Vataja Abhishyanda\",\"Pittaja Abhishyanda\",\"Kaphaja Abhishyanda\",\"Raktaja Abhishyanda\"]},{\"id\":61,\"icd\":\"TM27.30\",\"primary_sanskrit\":\"Karna Roga\",\"primary_english\":\"Ear diseases\",\"devanagari\":\"कर्ण रोग\",\"category\":\"ENT\",\"synonyms\":[\"Karna Roga\",\"Karnaroga\",\"Karna Vikara\",\"कर्ण रोग\",\"ear diseases\",\"otitis\",\"ear disorders\",\"Karna Paka\",\"Karna Nada\",\"Karna Srava\"]},{\"id\":62,\"icd\":\"TM27.31\",\"primary_sanskrit\":\"Nasa Roga\",\"primary_english\":\"Nasal diseases\",\"devanagari\":\"नासा रोग\",\"category\":\"ENT\",\"synonyms\":[\"Nasa Roga\",\"Nasaroga\",\"Nasa Vikara\",\"Ghrana Roga\",\"नासा रोग\",\"nasal diseases\",\"rhinitis\",\"sinusitis\",\"nasal disorders\",\"Nasa Pratinaha\"]},{\"id\":63,\"icd\":\"TM27.32\",\"primary_sanskrit\":\"Pratishyaya\",\"primary_english\":\"Common cold\",\"devanagari\":\"प्रतिश्याय\",\"category\":\"ENT\",\"synonyms\":[\"Pratishyaya\",\"Pratishyay\",\"Peenasa\",\"Pinasa\",\"प्रतिश्याय\",\"common cold\",\"coryza\",\"rhinitis\",\"cold\",\"Vataja Pratishyaya\",\"Pittaja Pratishyaya\",\"Kaphaja Pratishyaya\",\"Dushta Pratishyaya\"]},{\"id\":64,\"icd\":\"TM27.33\",\"primary_sanskrit\":\"Kantha Roga\",\"primary_english\":\"Throat diseases\",\"devanagari\":\"कण्ठ रोग\",\"category\":\"ENT\",\"synonyms\":[\"Kantha Roga\",\"Kantharoga\",\"Kantha Vikara\",\"Gala Roga\",\"Galaroga\",\"कण्ठ रोग\",\"throat diseases\",\"pharyngitis\",\"tonsillitis\",\"sore throat\",\"Rohini\",\"Galashundi\",\"Galashundika\"]},{\"id\":65,\"icd\":\"TM27.40\",\"primary_sanskrit\":\"Shotha\",\"primary_english\":\"Inflammation\",\"devanagari\":\"शोथ\",\"category\":\"Inflammatory\",\"synonyms\":[\"Shotha\",\"Shoth\",\"Sotha\",\"Shvayathu\",\"Svayathu\",\"शोथ\",\"inflammation\",\"edema\",\"oedema\",\"swelling\",\"Vataja Shotha\",\"Pittaja Shotha\",\"Kaphaja Shotha\",\"Sarvanga Shotha\",\"Ekanga Shotha\"]},{\"id\":66,\"icd\":\"TM27.41\",\"primary_sanskrit\":\"Vrana\",\"primary_english\":\"Wound\",\"devanagari\":\"व्रण\",\"category\":\"Inflammatory\",\"synonyms\":[\"Vrana\",\"Vruna\",\"Vran\",\"व्रण\",\"wound\",\"ulcer\",\"Nija Vrana\",\"Agantuja Vrana\",\"Dushta Vrana\",\"Shuddha Vrana\",\"Shastrakrita Vrana\"]},{\"id\":67,\"icd\":\"TM27.42\",\"primary_sanskrit\":\"Vidradhi\",\"primary_english\":\"Abscess\",\"devanagari\":\"विद्रधि\",\"category\":\"Inflammatory\",\"synonyms\":[\"Vidradhi\",\"Vidradhi Roga\",\"Vidraddhi\",\"विद्रधि\",\"abscess\",\"internal abscess\",\"Bahya Vidradhi\",\"Abhyantara Vidradhi\",\"Vataja Vidradhi\",\"Pittaja Vidradhi\"]},{\"id\":68,\"icd\":\"TM27.43\",\"primary_sanskrit\":\"Gulma\",\"primary_english\":\"Abdominal tumor\",\"devanagari\":\"गुल्म\",\"category\":\"Inflammatory\",\"synonyms\":[\"Gulma\",\"Gulm\",\"Gulma Roga\",\"गुल्म\",\"abdominal tumor\",\"abdominal lump\",\"phantom tumor\",\"Vataja Gulma\",\"Pittaja Gulma\",\"Kaphaja Gulma\",\"Raktaja Gulma\",\"Sannipataja Gulma\"]},{\"id\":69,\"icd\":\"TM28.00\",\"primary_sanskrit\":\"Vata Vyadhi\",\"primary_english\":\"Vata disorders\",\"devanagari\":\"वात व्याधि\",\"category\":\"Dosha\",\"synonyms\":[\"Vata Vyadhi\",\"Vatavyadhi\",\"Vata Roga\",\"Vata Vikara\",\"वात व्याधि\",\"Vata disorders\",\"neurological disorders\",\"vata diseases\",\"Nanatmaja Vata Vyadhi\",\"Ekayama\",\"Sarvanga Vata\"]},{\"id\":70,\"icd\":\"TM28.01\",\"primary_sanskrit\":\"Vataja Shiroroga\",\"primary_english\":\"Vata-type headache\",\"devanagari\":\"वातज शिरोरोग\",\"category\":\"Dosha\",\"synonyms\":[\"Vataja Shiroroga\",\"Vataja Shiro Roga\",\"Vataja Shirashula\",\"वातज शिरोरोग\",\"Vata headache\",\"Vata-type headache\",\"tension headache\"]},{\"id\":71,\"icd\":\"TM28.02\",\"primary_sanskrit\":\"Vataja Kasa\",\"primary_english\":\"Vata-type cough\",\"devanagari\":\"वातज कास\",\"category\":\"Dosha\",\"synonyms\":[\"Vataja Kasa\",\"Vataja Kaasa\",\"Vataja Kas\",\"वातज कास\",\"Vata-type cough\",\"dry cough\",\"Vata cough\"]},{\"id\":72,\"icd\":\"TM28.10\",\"primary_sanskrit\":\"Pitta Vyadhi\",\"primary_english\":\"Pitta disorders\",\"devanagari\":\"पित्त व्याधि\",\"category\":\"Dosha\",\"synonyms\":[\"Pitta Vyadhi\",\"Pittavyadhi\",\"Pitta Roga\",\"Pitta Vikara\",\"पित्त व्याधि\",\"Pitta disorders\",\"pitta diseases\",\"inflammatory conditions\",\"Nanatmaja Pitta Vyadhi\"]},{\"id\":73,\"icd\":\"TM28.11\",\"primary_sanskrit\":\"Pittaja Shiroroga\",\"primary_english\":\"Pitta-type headache\",\"devanagari\":\"पित्तज शिरोरोग\",\"category\":\"Dosha\",\"synonyms\":[\"Pittaja Shiroroga\",\"Pittaja Shiro Roga\",\"Pittaja Shirashula\",\"पित्तज शिरोरोग\",\"Pitta headache\",\"Pitta-type headache\",\"burning headache\"]},{\"id\":74,\"icd\":\"TM28.12\",\"primary_sanskrit\":\"Pittaja Atisara\",\"primary_english\":\"Pitta-type diarrhea\",\"devanagari\":\"पित्तज अतिसार\",\"category\":\"Dosha\",\"synonyms\":[\"Pittaja Atisara\",\"Pittaja Atisaar\",\"Pitta Atisara\",\"पित्तज अतिसार\",\"Pitta-type diarrhea\",\"Pitta diarrhea\",\"bloody diarrhea\"]},{\"id\":75,\"icd\":\"TM28.20\",\"primary_sanskrit\":\"Kapha Vyadhi\",\"primary_english\":\"Kapha disorders\",\"devanagari\":\"कफ व्याधि\",\"category\":\"Dosha\",\"synonyms\":[\"Kapha Vyadhi\",\"Kaphavyadhi\",\"Kapha Roga\",\"Kapha Vikara\",\"Shleshma Vyadhi\",\"कफ व्याधि\",\"Kapha disorders\",\"kapha diseases\",\"Nanatmaja Kapha Vyadhi\"]},{\"id\":76,\"icd\":\"TM28.21\",\"primary_sanskrit\":\"Kaphaja Kasa\",\"primary_english\":\"Kapha-type cough\",\"devanagari\":\"कफज कास\",\"category\":\"Dosha\",\"synonyms\":[\"Kaphaja Kasa\",\"Kaphaja Kaasa\",\"Kaphaja Kas\",\"Shlaishmika Kasa\",\"कफज कास\",\"Kapha-type cough\",\"productive cough\",\"wet cough\",\"Kapha cough\"]},{\"id\":77,\"icd\":\"TM28.22\",\"primary_sanskrit\":\"Kaphaja Shvasa\",\"primary_english\":\"Kapha-type asthma\",\"devanagari\":\"कफज श्वास\",\"category\":\"Dosha\",\"synonyms\":[\"Kaphaja Shvasa\",\"Kaphaja Shwasa\",\"Kaphaja Swasa\",\"कफज श्वास\",\"Kapha-type asthma\",\"Kapha asthma\",\"phlegmatic asthma\",\"Kapha breathlessness\"]},{\"id\":78,\"icd\":\"TM28.30\",\"primary_sanskrit\":\"Pandu\",\"primary_english\":\"Anemia\",\"devanagari\":\"पाण्डु\",\"category\":\"Blood\",\"synonyms\":[\"Pandu\",\"Paandu\",\"Pandu Roga\",\"Panduroga\",\"पाण्डु\",\"anemia\",\"anaemia\",\"Vataja Pandu\",\"Pittaja Pandu\",\"Kaphaja Pandu\",\"Sannipataja Pandu\",\"Mrittikaashita Pandu\"]},{\"id\":79,\"icd\":\"TM28.31\",\"primary_sanskrit\":\"Shosha\",\"primary_english\":\"Consumption/Tuberculosis\",\"devanagari\":\"शोष\",\"category\":\"Respiratory\",\"synonyms\":[\"Shosha\",\"Shosh\",\"Sosha\",\"शोष\",\"consumption\",\"tuberculosis\",\"TB\",\"pulmonary tuberculosis\",\"phthisis\",\"wasting disease\"]},{\"id\":80,\"icd\":\"TM28.32\",\"primary_sanskrit\":\"Rajayakshma\",\"primary_english\":\"Tuberculosis\",\"devanagari\":\"राजयक्ष्मा\",\"category\":\"Respiratory\",\"synonyms\":[\"Rajayakshma\",\"Raja Yakshma\",\"Raajayakshma\",\"Yakshma\",\"राजयक्ष्मा\",\"tuberculosis\",\"TB\",\"king of diseases\",\"Roga Raja\",\"Shosha\"]},{\"id\":81,\"icd\":\"TM28.33\",\"primary_sanskrit\":\"Kshaya\",\"primary_english\":\"Wasting\",\"devanagari\":\"क्षय\",\"category\":\"General\",\"synonyms\":[\"Kshaya\",\"Kshay\",\"Kshayam\",\"Dhatu Kshaya\",\"क्षय\",\"wasting\",\"depletion\",\"cachexia\",\"tissue wasting\",\"Ojakshaya\"]},{\"id\":82,\"icd\":\"TM28.34\",\"primary_sanskrit\":\"Jwara Atisara\",\"primary_english\":\"Fever with diarrhea\",\"devanagari\":\"ज्वर अतिसार\",\"category\":\"General\",\"synonyms\":[\"Jwara Atisara\",\"Jvara Atisara\",\"Jwara Atisaar\",\"ज्वर अतिसार\",\"fever with diarrhea\",\"fever with diarrhoea\",\"febrile diarrhea\",\"gastroenteritis\"]},{\"id\":83,\"icd\":\"TM28.35\",\"primary_sanskrit\":\"Visha\",\"primary_english\":\"Poisoning\",\"devanagari\":\"विष\",\"category\":\"Toxicological\",\"synonyms\":[\"Visha\",\"Vish\",\"Visham\",\"विष\",\"poisoning\",\"toxicity\",\"envenomation\",\"Sthavara Visha\",\"Jangama Visha\",\"Kritima Visha\"]},{\"id\":84,\"icd\":\"TM28.36\",\"primary_sanskrit\":\"Madatyaya\",\"primary_english\":\"Alcoholism\",\"devanagari\":\"मदात्यय\",\"category\":\"Toxicological\",\"synonyms\":[\"Madatyaya\",\"Madaatyaya\",\"Madatyay\",\"Mada Roga\",\"मदात्यय\",\"alcoholism\",\"alcohol intoxication\",\"alcohol abuse\",\"Panatyaya\",\"Paramada\"]},{\"id\":85,\"icd\":\"TM28.37\",\"primary_sanskrit\":\"Vatarakta\",\"primary_english\":\"Gout\",\"devanagari\":\"वातरक्त\",\"category\":\"Musculoskeletal\",\"synonyms\":[\"Vatarakta\",\"Vata Rakta\",\"Vataraktam\",\"Adhya Vata\",\"वातरक्त\",\"gout\",\"gouty arthritis\",\"hyperuricemia\",\"Khuda Vata\",\"Vata Balasa\",\"Vata Shonita\"]},{\"id\":86,\"icd\":\"TM28.38\",\"primary_sanskrit\":\"Klaibya\",\"primary_english\":\"Impotence\",\"devanagari\":\"क्लैब्य\",\"category\":\"Reproductive\",\"synonyms\":[\"Klaibya\",\"Klaibyam\",\"Klaibya Roga\",\"Napumsakata\",\"क्लैब्य\",\"impotence\",\"erectile dysfunction\",\"sexual dysfunction\",\"Dhvajabhanga\"]},{\"id\":87,\"icd\":\"TM28.39\",\"primary_sanskrit\":\"Shukra Dosha\",\"primary_english\":\"Semen disorders\",\"devanagari\":\"शुक्र दोष\",\"category\":\"Reproductive\",\"synonyms\":[\"Shukra Dosha\",\"Shukra Dushti\",\"Shukra Vikara\",\"Shukrakshaya\",\"शुक्र दोष\",\"semen disorders\",\"seminal disorders\",\"oligospermia\",\"Shukragata Vata\"]},{\"id\":88,\"icd\":\"TM28.40\",\"primary_sanskrit\":\"Mutraghat\",\"primary_english\":\"Urinary obstruction\",\"devanagari\":\"मूत्रघात\",\"category\":\"Urinary\",\"synonyms\":[\"Mutraghat\",\"Mutraghata\",\"Mutra Ghata\",\"Mutravarodha\",\"मूत्रघात\",\"urinary obstruction\",\"urinary blockage\",\"BPH\",\"Ashtheela\",\"Vatashtheela\"]},{\"id\":89,\"icd\":\"TM28.41\",\"primary_sanskrit\":\"Prameha Pidika\",\"primary_english\":\"Diabetic carbuncle\",\"devanagari\":\"प्रमेह पिडिका\",\"category\":\"Dermatological\",\"synonyms\":[\"Prameha Pidika\",\"Prameha Pidikaa\",\"Prameha Pidaka\",\"प्रमेह पिडिका\",\"diabetic carbuncle\",\"diabetic ulcer\",\"diabetic skin lesion\",\"Sharavika\",\"Kacchapika\",\"Vinata\"]},{\"id\":90,\"icd\":\"TM28.42\",\"primary_sanskrit\":\"Medoroga\",\"primary_english\":\"Lipid disorders\",\"devanagari\":\"मेदोरोग\",\"category\":\"Metabolic\",\"synonyms\":[\"Medoroga\",\"Medo Roga\",\"Meda Roga\",\"Medo Vikara\",\"मेदोरोग\",\"lipid disorders\",\"dyslipidemia\",\"hyperlipidemia\",\"hypercholesterolemia\",\"Medo Vriddhi\"]},{\"id\":91,\"icd\":\"TM28.43\",\"primary_sanskrit\":\"Udavarta\",\"primary_english\":\"Upward movement of Vata\",\"devanagari\":\"उदावर्त\",\"category\":\"Digestive\",\"synonyms\":[\"Udavarta\",\"Udaavarta\",\"Udavart\",\"Udavartha\",\"उदावर्त\",\"upward movement of Vata\",\"reverse peristalsis\",\"abdominal discomfort\",\"Pratiloma Vata\"]},{\"id\":92,\"icd\":\"TM28.44\",\"primary_sanskrit\":\"Annavaha Srotodusti\",\"primary_english\":\"GI tract disorders\",\"devanagari\":\"अन्नवह स्रोतोदुष्टि\",\"category\":\"Digestive\",\"synonyms\":[\"Annavaha Srotodusti\",\"Annavaha Srotodushti\",\"Annavaha Srotas Dushti\",\"Anna Vaha Srotodusti\",\"अन्नवह स्रोतोदुष्टि\",\"GI tract disorders\",\"gastrointestinal disorders\",\"alimentary canal disorders\",\"digestive channel disorders\"]},{\"id\":93,\"icd\":\"TM28.45\",\"primary_sanskrit\":\"Kshataja Kasa\",\"primary_english\":\"Traumatic cough\",\"devanagari\":\"क्षतज कास\",\"category\":\"Respiratory\",\"synonyms\":[\"Kshataja Kasa\",\"Kshataja Kaasa\",\"Kshata Kasa\",\"क्षतज कास\",\"traumatic cough\",\"injury-related cough\",\"cough from trauma\",\"haemoptysis\"]},{\"id\":94,\"icd\":\"TM28.46\",\"primary_sanskrit\":\"Kshudra Roga\",\"primary_english\":\"Minor disorders\",\"devanagari\":\"क्षुद्र रोग\",\"category\":\"General\",\"synonyms\":[\"Kshudra Roga\",\"Kshudraroga\",\"Kshudra Rog\",\"क्षुद्र रोग\",\"minor disorders\",\"minor diseases\",\"trivial diseases\"]},{\"id\":95,\"icd\":\"TM28.47\",\"primary_sanskrit\":\"Gara Visha\",\"primary_english\":\"Artificial poisoning\",\"devanagari\":\"गर विष\",\"category\":\"Toxicological\",\"synonyms\":[\"Gara Visha\",\"Gara Vish\",\"Garavisha\",\"गर विष\",\"artificial poisoning\",\"cumulative poisoning\",\"chronic poisoning\",\"Kritima Visha\"]},{\"id\":96,\"icd\":\"TM28.48\",\"primary_sanskrit\":\"Dantashula\",\"primary_english\":\"Toothache\",\"devanagari\":\"दन्तशूल\",\"category\":\"Dental\",\"synonyms\":[\"Dantashula\",\"Danta Shula\",\"Dantashoola\",\"Dant Shool\",\"दन्तशूल\",\"toothache\",\"dental pain\",\"odontalgia\"]},{\"id\":97,\"icd\":\"TM28.49\",\"primary_sanskrit\":\"Mukha Roga\",\"primary_english\":\"Oral diseases\",\"devanagari\":\"मुख रोग\",\"category\":\"Dental\",\"synonyms\":[\"Mukha Roga\",\"Mukharoga\",\"Mukha Vikara\",\"मुख रोग\",\"oral diseases\",\"mouth diseases\",\"stomatitis\",\"oral ulcers\",\"Danta Roga\",\"Dantamula Roga\"]},{\"id\":98,\"icd\":\"TM28.50\",\"primary_sanskrit\":\"Stanya Dosha\",\"primary_english\":\"Lactation disorders\",\"devanagari\":\"स्तन्य दोष\",\"category\":\"Gynecological\",\"synonyms\":[\"Stanya Dosha\",\"Stanya Dushti\",\"Stanya Vikara\",\"Stanya Kshaya\",\"स्तन्य दोष\",\"lactation disorders\",\"galactia\",\"agalactia\",\"breast milk disorders\"]},{\"id\":99,\"icd\":\"TM28.51\",\"primary_sanskrit\":\"Garbha Sravi\",\"primary_english\":\"Miscarriage\",\"devanagari\":\"गर्भ स्रावी\",\"category\":\"Gynecological\",\"synonyms\":[\"Garbha Sravi\",\"Garbhasravi\",\"Garbha Srava\",\"Garbha Pata\",\"Garbhapata\",\"गर्भ स्रावी\",\"miscarriage\",\"abortion\",\"spontaneous abortion\",\"pregnancy loss\"]},{\"id\":100,\"icd\":\"TM28.52\",\"primary_sanskrit\":\"Sutika Roga\",\"primary_english\":\"Postpartum disorders\",\"devanagari\":\"सूतिका रोग\",\"category\":\"Gynecological\",\"synonyms\":[\"Sutika Roga\",\"Sutikaroga\",\"Sutika Vikara\",\"Prasava Roga\",\"सूतिका रोग\",\"postpartum disorders\",\"puerperal disorders\",\"postnatal disorders\"]},{\"id\":101,\"icd\":\"TM29.00\",\"primary_sanskrit\":\"Daha\",\"primary_english\":\"Burning sensation\",\"devanagari\":\"दाह\",\"category\":\"Symptom\",\"synonyms\":[\"Daha\",\"Daah\",\"Daha Roga\",\"दाह\",\"burning sensation\",\"burning\",\"Anga Daha\",\"Sarvanga Daha\",\"Hrit Daha\",\"Hasta Daha\",\"Pada Daha\"]},{\"id\":102,\"icd\":\"TM29.01\",\"primary_sanskrit\":\"Chardi\",\"primary_english\":\"Vomiting\",\"devanagari\":\"चर्दि\",\"category\":\"Symptom\",\"synonyms\":[\"Chardi\",\"Chhardi\",\"Chardhi\",\"चर्दि\",\"vomiting\",\"emesis\",\"nausea\",\"Vataja Chardi\",\"Pittaja Chardi\",\"Kaphaja Chardi\",\"Sannipataja Chardi\",\"Agantuja Chardi\"]},{\"id\":103,\"icd\":\"TM29.02\",\"primary_sanskrit\":\"Murcha\",\"primary_english\":\"Fainting\",\"devanagari\":\"मूर्च्छा\",\"category\":\"Symptom\",\"synonyms\":[\"Murcha\",\"Murchha\",\"Moorchha\",\"Murchha Roga\",\"मूर्च्छा\",\"fainting\",\"syncope\",\"loss of consciousness\",\"Sanyasa\",\"Tama\"]},{\"id\":104,\"icd\":\"TM29.03\",\"primary_sanskrit\":\"Bhrama\",\"primary_english\":\"Vertigo\",\"devanagari\":\"भ्रम\",\"category\":\"Symptom\",\"synonyms\":[\"Bhrama\",\"Bhram\",\"Bhrama Roga\",\"भ्रम\",\"vertigo\",\"dizziness\",\"giddiness\",\"Shirobhrama\"]},{\"id\":105,\"icd\":\"TM29.04\",\"primary_sanskrit\":\"Klama\",\"primary_english\":\"Fatigue\",\"devanagari\":\"क्लम\",\"category\":\"Symptom\",\"synonyms\":[\"Klama\",\"Klam\",\"Klama Roga\",\"Shrama\",\"क्लम\",\"fatigue\",\"tiredness\",\"exhaustion\",\"Alasya\",\"Tandra\",\"Glani\"]},{\"id\":106,\"icd\":\"TM29.05\",\"primary_sanskrit\":\"Sveda\",\"primary_english\":\"Sweating\",\"devanagari\":\"स्वेद\",\"category\":\"Symptom\",\"synonyms\":[\"Sveda\",\"Sweda\",\"Svedadhikya\",\"Atisvedana\",\"स्वेद\",\"sweating\",\"perspiration\",\"excessive sweating\",\"hyperhidrosis\",\"diaphoresis\"]},{\"id\":107,\"icd\":\"TM29.06\",\"primary_sanskrit\":\"Angamarda\",\"primary_english\":\"Body ache\",\"devanagari\":\"अङ्गमर्द\",\"category\":\"Symptom\",\"synonyms\":[\"Angamarda\",\"Anga Marda\",\"Angamard\",\"अङ्गमर्द\",\"body ache\",\"bodyache\",\"myalgia\",\"body pain\",\"Deha Shoola\"]},{\"id\":108,\"icd\":\"TM29.07\",\"primary_sanskrit\":\"Jwara Bhrama\",\"primary_english\":\"Fever with delirium\",\"devanagari\":\"ज्वर भ्रम\",\"category\":\"Symptom\",\"synonyms\":[\"Jwara Bhrama\",\"Jvara Bhrama\",\"Jwara Bhram\",\"ज्वर भ्रम\",\"fever with delirium\",\"febrile delirium\",\"delirious fever\",\"Sannipataja Jwara\"]},{\"id\":109,\"icd\":\"TM29.10\",\"primary_sanskrit\":\"Karnashula\",\"primary_english\":\"Ear pain\",\"devanagari\":\"कर्णशूल\",\"category\":\"ENT\",\"synonyms\":[\"Karnashula\",\"Karna Shula\",\"Karnashoola\",\"Karna Shoola\",\"कर्णशूल\",\"ear pain\",\"earache\",\"otalgia\"]},{\"id\":110,\"icd\":\"TM29.11\",\"primary_sanskrit\":\"Badhirya\",\"primary_english\":\"Deafness\",\"devanagari\":\"बधिर्य\",\"category\":\"ENT\",\"synonyms\":[\"Badhirya\",\"Baadhirya\",\"Badhiryam\",\"बधिर्य\",\"deafness\",\"hearing loss\",\"hearing impairment\",\"Karna Nada\"]},{\"id\":111,\"icd\":\"TM29.12\",\"primary_sanskrit\":\"Nasapaka\",\"primary_english\":\"Nasal ulceration\",\"devanagari\":\"नासापाक\",\"category\":\"ENT\",\"synonyms\":[\"Nasapaka\",\"Nasa Paka\",\"Naasapaaka\",\"नासापाक\",\"nasal ulceration\",\"nasal sore\",\"nasal inflammation\"]},{\"id\":112,\"icd\":\"TM29.13\",\"primary_sanskrit\":\"Galashundi\",\"primary_english\":\"Throat abscess\",\"devanagari\":\"गलशुण्डि\",\"category\":\"ENT\",\"synonyms\":[\"Galashundi\",\"Gala Shundi\",\"Galashundika\",\"Galashundikaa\",\"गलशुण्डि\",\"throat abscess\",\"peritonsillar abscess\",\"quinsy\",\"uvulitis\"]},{\"id\":113,\"icd\":\"TM29.14\",\"primary_sanskrit\":\"Dantabheda\",\"primary_english\":\"Tooth sensitivity\",\"devanagari\":\"दन्तभेद\",\"category\":\"Dental\",\"synonyms\":[\"Dantabheda\",\"Danta Bheda\",\"Dantbhed\",\"दन्तभेद\",\"tooth sensitivity\",\"dental sensitivity\",\"dentinal hypersensitivity\",\"Danta Harsha\"]},{\"id\":114,\"icd\":\"TM29.15\",\"primary_sanskrit\":\"Oshtabheda\",\"primary_english\":\"Cracked lips\",\"devanagari\":\"ओष्ठभेद\",\"category\":\"Dental\",\"synonyms\":[\"Oshtabheda\",\"Oshtha Bheda\",\"Oshthabhed\",\"ओष्ठभेद\",\"cracked lips\",\"cheilitis\",\"lip fissure\",\"chapped lips\"]},{\"id\":115,\"icd\":\"TM29.16\",\"primary_sanskrit\":\"Jihva Roga\",\"primary_english\":\"Tongue disorders\",\"devanagari\":\"जिह्वा रोग\",\"category\":\"Dental\",\"synonyms\":[\"Jihva Roga\",\"Jihvaroga\",\"Jihva Vikara\",\"जिह्वा रोग\",\"tongue disorders\",\"glossitis\",\"tongue diseases\",\"Adhijihva\"]},{\"id\":116,\"icd\":\"TM29.20\",\"primary_sanskrit\":\"Kotha\",\"primary_english\":\"Urticaria\",\"devanagari\":\"कोठ\",\"category\":\"Dermatological\",\"synonyms\":[\"Kotha\",\"Koth\",\"Kotha Roga\",\"कोठ\",\"urticaria\",\"hives\",\"Shitapitta\",\"Sheetapitta\",\"allergic rash\"]},{\"id\":117,\"icd\":\"TM29.21\",\"primary_sanskrit\":\"Shitapitta\",\"primary_english\":\"Cold urticaria\",\"devanagari\":\"शीतपित्त\",\"category\":\"Dermatological\",\"synonyms\":[\"Shitapitta\",\"Sheetapitta\",\"Sheeta Pitta\",\"Shita Pitta\",\"शीतपित्त\",\"cold urticaria\",\"urticaria\",\"allergic hives\",\"Kotha\",\"Udarda\"]},{\"id\":118,\"icd\":\"TM29.22\",\"primary_sanskrit\":\"Udarda\",\"primary_english\":\"Rash\",\"devanagari\":\"उदर्द\",\"category\":\"Dermatological\",\"synonyms\":[\"Udarda\",\"Udard\",\"Udardha\",\"उदर्द\",\"rash\",\"skin rash\",\"dermatitis\",\"Kotha\"]},{\"id\":119,\"icd\":\"TM29.23\",\"primary_sanskrit\":\"Visphota\",\"primary_english\":\"Vesicles\",\"devanagari\":\"विस्फोट\",\"category\":\"Dermatological\",\"synonyms\":[\"Visphota\",\"Visfota\",\"Visphotaka\",\"विस्फोट\",\"vesicles\",\"blisters\",\"bullae\",\"skin eruptions\"]},{\"id\":120,\"icd\":\"TM29.24\",\"primary_sanskrit\":\"Pidika\",\"primary_english\":\"Pimples\",\"devanagari\":\"पिडिका\",\"category\":\"Dermatological\",\"synonyms\":[\"Pidika\",\"Pidakaa\",\"Pidika Roga\",\"Mukha Pidika\",\"Yuvanapidika\",\"पिडिका\",\"pimples\",\"acne\",\"acne vulgaris\",\"pustules\"]},{\"id\":121,\"icd\":\"TM29.25\",\"primary_sanskrit\":\"Vyanga\",\"primary_english\":\"Facial melanosis\",\"devanagari\":\"व्यङ्ग\",\"category\":\"Dermatological\",\"synonyms\":[\"Vyanga\",\"Vyang\",\"Vyangam\",\"व्यङ्ग\",\"facial melanosis\",\"facial pigmentation\",\"melasma\",\"chloasma\",\"facial dark spots\"]},{\"id\":122,\"icd\":\"TM29.26\",\"primary_sanskrit\":\"Tilkalaka\",\"primary_english\":\"Moles\",\"devanagari\":\"तिलकालक\",\"category\":\"Dermatological\",\"synonyms\":[\"Tilkalaka\",\"Tila Kalaka\",\"Tilakaalaka\",\"तिलकालक\",\"moles\",\"nevi\",\"naevus\",\"skin moles\"]},{\"id\":123,\"icd\":\"TM29.27\",\"primary_sanskrit\":\"Nyachha\",\"primary_english\":\"Dark patches\",\"devanagari\":\"न्यच्छ\",\"category\":\"Dermatological\",\"synonyms\":[\"Nyachha\",\"Nyaccha\",\"Nilika\",\"न्यच्छ\",\"dark patches\",\"hyperpigmentation\",\"dark spots\",\"skin discoloration\"]},{\"id\":124,\"icd\":\"TM29.28\",\"primary_sanskrit\":\"Svitra\",\"primary_english\":\"Vitiligo\",\"devanagari\":\"श्वित्र\",\"category\":\"Dermatological\",\"synonyms\":[\"Svitra\",\"Shvitra\",\"Shwitra\",\"Svitram\",\"श्वित्र\",\"vitiligo\",\"leucoderma\",\"depigmentation\",\"Kilasa\"]},{\"id\":125,\"icd\":\"TM29.29\",\"primary_sanskrit\":\"Indralupta\",\"primary_english\":\"Alopecia areata\",\"devanagari\":\"इन्द्रलुप्त\",\"category\":\"Dermatological\",\"synonyms\":[\"Indralupta\",\"Indraluptam\",\"Indra Lupta\",\"Ruhya\",\"इन्द्रलुप्त\",\"alopecia areata\",\"patchy hair loss\",\"alopecia\",\"Rujya\"]},{\"id\":126,\"icd\":\"TM29.30\",\"primary_sanskrit\":\"Khalitya\",\"primary_english\":\"Baldness\",\"devanagari\":\"खालित्य\",\"category\":\"Dermatological\",\"synonyms\":[\"Khalitya\",\"Khaalitya\",\"Khalityam\",\"खालित्य\",\"baldness\",\"alopecia\",\"hair loss\",\"Kesha Pata\",\"Indralupta\"]},{\"id\":127,\"icd\":\"TM29.40\",\"primary_sanskrit\":\"Urusthambha\",\"primary_english\":\"Thigh stiffness\",\"devanagari\":\"ऊरुस्तम्भ\",\"category\":\"Musculoskeletal\",\"synonyms\":[\"Urusthambha\",\"Uru Stambha\",\"Urustambha\",\"Urustambh\",\"ऊरुस्तम्भ\",\"thigh stiffness\",\"leg stiffness\",\"thigh rigidity\"]},{\"id\":128,\"icd\":\"TM29.41\",\"primary_sanskrit\":\"Manyastambha\",\"primary_english\":\"Neck stiffness\",\"devanagari\":\"मन्यास्तम्भ\",\"category\":\"Musculoskeletal\",\"synonyms\":[\"Manyastambha\",\"Manya Stambha\",\"Manyaastambha\",\"मन्यास्तम्भ\",\"neck stiffness\",\"cervical spondylosis\",\"torticollis\",\"stiff neck\"]},{\"id\":129,\"icd\":\"TM29.42\",\"primary_sanskrit\":\"Hanustambha\",\"primary_english\":\"Jaw stiffness\",\"devanagari\":\"हनुस्तम्भ\",\"category\":\"Musculoskeletal\",\"synonyms\":[\"Hanustambha\",\"Hanu Stambha\",\"Hanustambh\",\"हनुस्तम्भ\",\"jaw stiffness\",\"lockjaw\",\"trismus\",\"TMJ disorders\"]},{\"id\":130,\"icd\":\"TM29.43\",\"primary_sanskrit\":\"Pangutva\",\"primary_english\":\"Lameness/disability\",\"devanagari\":\"पङ्गुत्व\",\"category\":\"Musculoskeletal\",\"synonyms\":[\"Pangutva\",\"Pangutvam\",\"Pangu\",\"Pangutva Roga\",\"पङ्गुत्व\",\"lameness\",\"disability\",\"limb disability\",\"paralytic gait\"]},{\"id\":131,\"icd\":\"TM29.50\",\"primary_sanskrit\":\"Parshva Shoola\",\"primary_english\":\"Chest pain\",\"devanagari\":\"पार्श्व शूल\",\"category\":\"Pain\",\"synonyms\":[\"Parshva Shoola\",\"Parshvashula\",\"Parshva Shula\",\"Parshva Shool\",\"पार्श्व शूल\",\"chest pain\",\"pleuritic pain\",\"lateral chest pain\",\"pleurisy\"]},{\"id\":132,\"icd\":\"TM29.51\",\"primary_sanskrit\":\"Udara Shoola\",\"primary_english\":\"Abdominal pain\",\"devanagari\":\"उदर शूल\",\"category\":\"Pain\",\"synonyms\":[\"Udara Shoola\",\"Udarashula\",\"Udara Shula\",\"Udar Shool\",\"उदर शूल\",\"abdominal pain\",\"stomach pain\",\"colic\",\"abdominal colic\"]},{\"id\":133,\"icd\":\"TM29.52\",\"primary_sanskrit\":\"Hrit Shoola\",\"primary_english\":\"Cardiac pain\",\"devanagari\":\"हृत् शूल\",\"category\":\"Pain\",\"synonyms\":[\"Hrit Shoola\",\"Hrit Shula\",\"Hrid Shoola\",\"Hridayashula\",\"Hrit Shool\",\"हृत् शूल\",\"cardiac pain\",\"angina\",\"chest pain\",\"Hridaya Shoola\"]},{\"id\":134,\"icd\":\"TM29.53\",\"primary_sanskrit\":\"Prushtha Shoola\",\"primary_english\":\"Back pain\",\"devanagari\":\"पृष्ठ शूल\",\"category\":\"Pain\",\"synonyms\":[\"Prushtha Shoola\",\"Prishtha Shoola\",\"Prishtha Shula\",\"Prushtha Shula\",\"Prishtha Shool\",\"पृष्ठ शूल\",\"back pain\",\"backache\",\"dorsalgia\"]},{\"id\":135,\"icd\":\"TM29.54\",\"primary_sanskrit\":\"Trika Shoola\",\"primary_english\":\"Sacral pain\",\"devanagari\":\"त्रिक शूल\",\"category\":\"Pain\",\"synonyms\":[\"Trika Shoola\",\"Trika Shula\",\"Trikashula\",\"Trika Shool\",\"त्रिक शूल\",\"sacral pain\",\"sacroiliac pain\",\"pelvic pain\",\"Trika Graha\"]},{\"id\":136,\"icd\":\"TM29.60\",\"primary_sanskrit\":\"Amlapitta\",\"primary_english\":\"Acid dyspepsia\",\"devanagari\":\"अम्लपित्त\",\"category\":\"Digestive\",\"synonyms\":[\"Amlapitta\",\"Amla Pitta\",\"Amlapitta Roga\",\"अम्लपित्त\",\"acid dyspepsia\",\"hyperacidity\",\"acid reflux\",\"GERD\",\"gastritis\",\"Urdhvaga Amlapitta\",\"Adhoga Amlapitta\"]},{\"id\":137,\"icd\":\"TM29.61\",\"primary_sanskrit\":\"Pakvashaya Gata Vata\",\"primary_english\":\"Colonic gas\",\"devanagari\":\"पक्वाशय गत वात\",\"category\":\"Digestive\",\"synonyms\":[\"Pakvashaya Gata Vata\",\"Pakvashayagata Vata\",\"Pakwashaya Gata Vata\",\"पक्वाशय गत वात\",\"colonic gas\",\"intestinal gas\",\"flatulence\",\"Adhmana\"]},{\"id\":138,\"icd\":\"TM29.62\",\"primary_sanskrit\":\"Vibandha\",\"primary_english\":\"Constipation\",\"devanagari\":\"विबन्ध\",\"category\":\"Digestive\",\"synonyms\":[\"Vibandha\",\"Vibandh\",\"Vibandhha\",\"Malavarodha\",\"Malavshtambha\",\"विबन्ध\",\"constipation\",\"Anaha\",\"Malabaddha\",\"Kosthbaddhata\"]},{\"id\":139,\"icd\":\"TM29.70\",\"primary_sanskrit\":\"Vataja Netraroga\",\"primary_english\":\"Vata eye disorders\",\"devanagari\":\"वातज नेत्ररोग\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Vataja Netraroga\",\"Vataja Netra Roga\",\"Vataja Akshi Roga\",\"वातज नेत्ररोग\",\"Vata eye disorders\",\"Vata-type eye disease\",\"dry eye\"]},{\"id\":140,\"icd\":\"TM29.71\",\"primary_sanskrit\":\"Pittaja Netraroga\",\"primary_english\":\"Pitta eye disorders\",\"devanagari\":\"पित्तज नेत्ररोग\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Pittaja Netraroga\",\"Pittaja Netra Roga\",\"Pittaja Akshi Roga\",\"पित्तज नेत्ररोग\",\"Pitta eye disorders\",\"Pitta-type eye disease\",\"inflammatory eye disease\"]},{\"id\":141,\"icd\":\"TM29.72\",\"primary_sanskrit\":\"Kaphaja Netraroga\",\"primary_english\":\"Kapha eye disorders\",\"devanagari\":\"कफज नेत्ररोग\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Kaphaja Netraroga\",\"Kaphaja Netra Roga\",\"Kaphaja Akshi Roga\",\"Shlaishmika Netraroga\",\"कफज नेत्ररोग\",\"Kapha eye disorders\",\"Kapha-type eye disease\"]},{\"id\":142,\"icd\":\"TM29.73\",\"primary_sanskrit\":\"Adhimantha\",\"primary_english\":\"Glaucoma\",\"devanagari\":\"अधिमन्थ\",\"category\":\"Ophthalmological\",\"synonyms\":[\"Adhimantha\",\"Adhimanthya\",\"Adhimantha Roga\",\"अधिमन्थ\",\"glaucoma\",\"raised intraocular pressure\",\"Vataja Adhimantha\",\"Pittaja Adhimantha\",\"Kaphaja Adhimantha\",\"Raktaja Adhimantha\"]},{\"id\":143,\"icd\":\"TM29.80\",\"primary_sanskrit\":\"Vatabalasa\",\"primary_english\":\"Vata disorders in children\",\"devanagari\":\"वातबलास\",\"category\":\"Pediatric\",\"synonyms\":[\"Vatabalasa\",\"Vata Balasa\",\"Bala Vata Roga\",\"वातबलास\",\"Vata disorders in children\",\"pediatric Vata\",\"childhood neurological disorders\"]},{\"id\":144,\"icd\":\"TM29.81\",\"primary_sanskrit\":\"Balanaka\",\"primary_english\":\"Pediatric disorders\",\"devanagari\":\"बालनाक\",\"category\":\"Pediatric\",\"synonyms\":[\"Balanaka\",\"Bala Roga\",\"Balaroga\",\"Bala Graha\",\"बालनाक\",\"pediatric disorders\",\"childhood diseases\",\"Bala Chikitsa\"]},{\"id\":145,\"icd\":\"TM29.82\",\"primary_sanskrit\":\"Gara\",\"primary_english\":\"Chronic poisoning\",\"devanagari\":\"गर\",\"category\":\"Toxicological\",\"synonyms\":[\"Gara\",\"Gara Visha\",\"Garavisha\",\"गर\",\"chronic poisoning\",\"slow poisoning\",\"cumulative toxicity\",\"Dushi Visha\"]},{\"id\":146,\"icd\":\"TM29.83\",\"primary_sanskrit\":\"Daṃṣṭodbhava\",\"primary_english\":\"Snake bite\",\"devanagari\":\"दंष्टोद्भव\",\"category\":\"Toxicological\",\"synonyms\":[\"Damshtodbhava\",\"Sarpadamsha\",\"Sarpa Damsha\",\"Sarpadamshta\",\"Sarpa Visha\",\"दंष्टोद्भव\",\"snake bite\",\"snakebite\",\"serpent bite\",\"envenomation\"]},{\"id\":147,\"icd\":\"TM29.84\",\"primary_sanskrit\":\"Krimiroga\",\"primary_english\":\"Parasitic infections\",\"devanagari\":\"कृमिरोग\",\"category\":\"Infectious\",\"synonyms\":[\"Krimiroga\",\"Krimi Roga\",\"Krimi\",\"Krumi Roga\",\"कृमिरोग\",\"parasitic infections\",\"helminthiasis\",\"worm infection\",\"parasitosis\"]},{\"id\":148,\"icd\":\"TM29.85\",\"primary_sanskrit\":\"Vatarakta Vrana\",\"primary_english\":\"Gouty ulcers\",\"devanagari\":\"वातरक्त व्रण\",\"category\":\"Dermatological\",\"synonyms\":[\"Vatarakta Vrana\",\"Vata Rakta Vrana\",\"Vatarakta Vran\",\"वातरक्त व्रण\",\"gouty ulcers\",\"gouty wound\",\"tophaceous ulcer\",\"Vatarakta Vidradhi\"]},{\"id\":149,\"icd\":\"TM29.86\",\"primary_sanskrit\":\"Rohini\",\"primary_english\":\"Diphtheria\",\"devanagari\":\"रोहिणी\",\"category\":\"ENT\",\"synonyms\":[\"Rohini\",\"Rohinee\",\"Rohini Roga\",\"रोहिणी\",\"diphtheria\",\"throat membrane\",\"Gala Roga\"]},{\"id\":150,\"icd\":\"TM29.87\",\"primary_sanskrit\":\"Sarvaroga\",\"primary_english\":\"Systemic diseases\",\"devanagari\":\"सर्वरोग\",\"category\":\"General\",\"synonyms\":[\"Sarvaroga\",\"Sarva Roga\",\"Sarvanga Roga\",\"सर्वरोग\",\"systemic diseases\",\"generalized diseases\",\"constitutional disorders\",\"Sannipata Roga\"]}];\n\n// Diseases are returned in fixed ICD order (id 1→150) for deterministic incremental processing.\n// To resume from a specific disease, filter by id: tm2Diseases.filter(d => d.id >= startId)\nconsole.log('First disease: ' + tm2Diseases[0].primary_sanskrit); // Always Jvara (id=1)\nconsole.log('Loaded ' + tm2Diseases.length + ' diseases');\n\nreturn tm2Diseases.map(d => ({ json: d }));"
+      },
+      "id": "84a6a4e4-49bf-4236-b80b-5b2ba3de1fcd",
+      "name": "Load TM2 (150 Diseases)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        3936
+      ],
+      "notes": "150 diseases = 100 core TM2 + 50 supplementary terms for ~90% corpus coverage"
+    },
+    {
+      "parameters": {
+        "model": "qwen3-embedding:4b"
+      },
+      "id": "deca988e-14bd-4637-97a5-1119c58b31c8",
+      "name": "Embeddings Ollama",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOllama",
+      "position": [
+        336,
+        4208
+      ],
+      "typeVersion": 1,
+      "credentials": {
+        "ollamaApi": {
+          "id": "2Jd167YNrvbZysO5",
+          "name": "Ollama account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Manual Trigger": [
+      {
+        "json": {},
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load TM2 (150 Diseases)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop: Each Disease": {
+      "main": [
+        [
+          {
+            "node": "Calculate Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Loop Back": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Statistics": {
+      "main": [
+        [
+          {
+            "node": "Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store All (PostgreSQL)": {
+      "main": [
+        [
+          {
+            "node": "Validation Loop Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Operation, do nothing": {
+      "main": [
+        [
+          {
+            "node": "Loop: Each Disease",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Store All (PostgreSQL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Filter": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Report": {
+      "main": [
+        []
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Parse and Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Web search Herbs": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant Vector Store": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load TM2 (150 Diseases)": {
+      "main": [
+        [
+          {
+            "node": "Loop: Each Disease",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Ollama": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Qdrant Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b6d48038-1ee2-400b-9136-cf4294445887",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d5916a4c66673608c0331fba7cbae52e9b88270bfdef6cbcbf8524d7b5d76f9b"
+  },
+  "nodeGroups": [],
+  "id": "yATwnVq5jTiyWhJy",
+  "tags": []
+}
