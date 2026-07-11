@@ -1,0 +1,97 @@
+{
+  "name": "Agent 4_Final_2026-07-10",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        -144
+      ],
+      "id": "fdff4230-bb2c-45cd-94a3-848a1b790626",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO gap_scores (\n  herb_id, category_id, classical_mentions, classical_prominence_score,\n  in_vitro_count, in_vivo_count, clinical_trial_count, review_count,\n  modern_validation_score, last_calculated\n)\nSELECT \n  hda.herb_id,\n  tc.category_id,  -- NULL for 23/24 unmapped categories ✅\n  SUM(hda.classical_mentions),\n  AVG(COALESCE(hda.prominence_score, 1)),\n  COUNT(CASE WHEN msc.study_type = 'in_vitro' THEN 1 END),\n  COUNT(CASE WHEN msc.study_type = 'in_vivo' THEN 1 END),\n  COUNT(CASE WHEN msc.study_type = 'clinical_trial' THEN 1 END),\n  COUNT(CASE WHEN msc.study_type IN ('review', 'metaanalysis') THEN 1 END),\n  ROUND(AVG(COALESCE(msc.llm_confidence, 0))::numeric, 3)::double precision,\n  CURRENT_TIMESTAMP\nFROM herb_disease_associations hda\nJOIN herbs_master hm ON hda.herb_id = hm.herb_id\nLEFT JOIN therapeutic_categories tc ON hda.disease_category = tc.category_name\nLEFT JOIN modern_studies_classified msc ON hda.association_id = msc.association_id\nWHERE hm.botanical_name IS NOT NULL AND hm.skip_reason IS NULL\nGROUP BY hda.herb_id, tc.category_id\nON CONFLICT (herb_id, category_id) DO UPDATE SET\n  classical_mentions = EXCLUDED.classical_mentions,\n  clinical_trial_count = EXCLUDED.clinical_trial_count,\n  modern_validation_score = EXCLUDED.modern_validation_score,\n  last_calculated = CURRENT_TIMESTAMP;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -368,
+        -160
+      ],
+      "id": "c32d8cea-77fe-43f7-91c2-03f81a9bba79",
+      "name": "PostgreSQL Data Aggregation Node",
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE OR REPLACE VIEW v_gap_analysis AS\nWITH pair_metrics AS (\n  SELECT \n    hda.association_id,\n    hda.herb_id,\n    hm.botanical_name AS herb,\n    hm.sanskrit_name,\n    hda.disease_id,\n    dm.english_name AS disease,\n    hda.disease_category,\n    hda.prominence_score,\n    hda.classical_mentions,\n    COALESCE(msr.paper_count, 0) AS total_modern_studies,\n    GREATEST(0, \n      (COALESCE(hda.prominence_score, 0) * 10) - \n      LEAST(COALESCE(msr.paper_count, 0) * 0.5, 5)\n    ) AS raw_gap_score\n  FROM herb_disease_associations hda\n  JOIN herbs_master hm ON hda.herb_id = hm.herb_id\n  JOIN diseases_master dm ON hda.disease_id = dm.disease_id\n  LEFT JOIN (\n    SELECT association_id, COUNT(*) AS paper_count\n    FROM modern_studies_raw GROUP BY association_id\n  ) msr ON hda.association_id = msr.association_id\n  WHERE hda.association_type = 'indicated'\n    AND hda.skip_reason IS NULL\n)\nSELECT \n  pm.association_id, pm.herb, pm.sanskrit_name, pm.disease, pm.disease_category,\n  pm.classical_mentions, pm.prominence_score,\n  pm.total_modern_studies,\n  ROUND(pm.raw_gap_score::numeric, 2) AS gap_score,\n  CASE \n    WHEN pm.raw_gap_score >= 8 THEN 1\n    WHEN pm.raw_gap_score >= 5 THEN 2\n    WHEN pm.raw_gap_score >= 3 THEN 3\n    ELSE 5\n  END AS priority_rank,\n  CASE \n    WHEN pm.total_modern_studies = 0 THEN 'CRITICAL: No studies'\n    WHEN pm.raw_gap_score >= 5 THEN 'HIGH GAP'\n    ELSE 'LOW PRIORITY'\n  END AS research_recommendation,\n  COALESCE(msr_max.fetched_max, '1900-01-01'::timestamp) AS last_evidence_date\nFROM pair_metrics pm\nLEFT JOIN (\n  SELECT association_id, MAX(fetched_at) AS fetched_max\n  FROM modern_studies_raw GROUP BY association_id\n) msr_max ON pm.association_id = msr_max.association_id\nORDER BY pm.raw_gap_score DESC NULLS LAST, pm.prominence_score desc;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -160,
+        -160
+      ],
+      "id": "4f5036af-c25f-4c25-9b1f-ee6e33d57705",
+      "name": "GAP score calculator",
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL Data Aggregation Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL Data Aggregation Node": {
+      "main": [
+        [
+          {
+            "node": "GAP score calculator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "e5768ea2-9071-4cf0-8f35-8e31d7a87d8c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d5916a4c66673608c0331fba7cbae52e9b88270bfdef6cbcbf8524d7b5d76f9b"
+  },
+  "nodeGroups": [],
+  "id": "F9RRlld7B91og2GT",
+  "tags": []
+}
