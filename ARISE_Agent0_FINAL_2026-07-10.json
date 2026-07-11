@@ -52,7 +52,7 @@
       ],
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -86,7 +86,7 @@
       ],
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -315,7 +315,7 @@
       "name": "Web search Herbs",
       "credentials": {
         "searXngApi": {
-          "id": "iLXAIeOAjmq80QAK",
+          "id": "REPLACE",
           "name": "SearXNG account"
         }
       }
@@ -329,9 +329,9 @@
           "__rl": true,
           "value": "ethno4",
           "mode": "list",
-          "cachedResultName": "ethno4"
+          "cachedResultName": "ethnopharmacology"
         },
-        "topK": 40,
+        "topK": 80,
         "options": {
           "contentPayloadKey": "text",
           "metadataPayloadKey": "metadata"
@@ -347,7 +347,7 @@
       "typeVersion": 1.2,
       "credentials": {
         "qdrantApi": {
-          "id": "q2MD0OGus6nRo0Do",
+          "id": "REPLACE",
           "name": "QdrantApi account"
         }
       }
@@ -380,7 +380,7 @@
       "typeVersion": 1,
       "credentials": {
         "ollamaApi": {
-          "id": "2Jd167YNrvbZysO5",
+          "id": "REPLACE",
           "name": "Ollama account"
         }
       }
