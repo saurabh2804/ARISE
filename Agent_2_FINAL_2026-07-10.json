@@ -28,7 +28,7 @@
       ],
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -65,7 +65,7 @@
       "alwaysOutputData": true,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -252,7 +252,7 @@
       "alwaysOutputData": false,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -301,7 +301,7 @@
       "name": "presearch_query",
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
