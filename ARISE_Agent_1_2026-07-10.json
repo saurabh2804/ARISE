@@ -80,7 +80,7 @@
       "name": "OpenAI Chat Model with LiteLLM",
       "credentials": {
         "openAiApiWithLitellmApi": {
-          "id": "knaskQZbHfCWMJQM",
+          "id": "REPLACE_WITH_YOURS",
           "name": "OpenAI with LiteLLM account"
         }
       }
@@ -103,7 +103,7 @@
       "name": "Web search Herbs",
       "credentials": {
         "searXngApi": {
-          "id": "iLXAIeOAjmq80QAK",
+          "id": "REPLACE_WITH_YOURS",
           "name": "SearXNG account"
         }
       },
@@ -235,7 +235,7 @@
       "name": "non herb DB",
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -270,7 +270,7 @@
       "alwaysOutputData": true,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -292,7 +292,7 @@
       "alwaysOutputData": false,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -314,7 +314,7 @@
       "alwaysOutputData": false,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -350,7 +350,7 @@
       "name": "Dynamic input selector",
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
@@ -415,7 +415,7 @@
       "alwaysOutputData": false,
       "credentials": {
         "postgres": {
-          "id": "sMacPJvBxk2PM6AF",
+          "id": "REPLACE",
           "name": "Postgres account"
         }
       }
